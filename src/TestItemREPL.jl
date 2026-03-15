@@ -1,8 +1,11 @@
 module TestItemREPL
 
 using ReplMaker
-using TestItemRunner2: run_tests, kill_test_processes, TestEnvironment, TestrunResult
-using TestItemRunner2.TestItemControllers.CancellationTokens: CancellationTokenSource, cancel, get_token
+using TestItemRunnerCore: run_tests, kill_test_processes, terminate_process,
+    get_active_processes, RunProfile, ProcessInfo,
+    TestrunResult, TestrunResultTestitem, TestrunResultTestitemProfile,
+    TestrunResultMessage, TestrunResultDefinitionError,
+    CancellationTokenSource, cancel, get_token
 using JuliaWorkspaces
 using JuliaWorkspaces.URIs2: uri2filepath
 
@@ -57,6 +60,7 @@ function cmd_help()
     println("  status                        Show background run status")
     println("  cancel                        Cancel active background run")
     println("  results                       Show last test run results")
+    println("  processes                     Show active test processes")
     println("  kill                          Kill all test processes")
     nothing
 end
@@ -139,7 +143,7 @@ function _build_run_kwargs(args; return_results=false)
         run_kwargs[:timeout] = parse(Int, kwargs[:timeout])
     end
     if :coverage in flags
-        run_kwargs[:environments] = [TestEnvironment("Default", true, Dict{String,Any}())]
+        run_kwargs[:environments] = [RunProfile("Default", true, Dict{String,Any}())]
     end
 
     tag_filter = if haskey(kwargs, :tags)
@@ -336,6 +340,34 @@ function cmd_kill()
     nothing
 end
 
+function cmd_processes()
+    procs = get_active_processes()
+    if isempty(procs)
+        println("No active test processes.")
+        return nothing
+    end
+
+    printstyled("Active test processes:\n\n"; bold=true)
+    printstyled("  $(rpad("ID", 38))$(rpad("Package", 30))Status\n"; bold=true)
+    printstyled("  $(repeat("─", 78))\n"; color=:light_black)
+    for p in procs
+        status_color = if p.status == "Running"
+            :green
+        elseif p.status == "Idle"
+            :light_black
+        elseif p.status in ("Launching", "Activating", "Revising")
+            :yellow
+        else
+            :default
+        end
+        print("  $(rpad(p.id, 38))$(rpad(p.package_name, 30))")
+        printstyled("$(p.status)\n"; color=status_color)
+    end
+    println()
+    println("$(length(procs)) process(es) active.")
+    nothing
+end
+
 # ── Helpers ───────────────────────────────────────────────────────────
 
 function _check_bg_completion()
@@ -383,6 +415,8 @@ function repl_parser(input::String)
         return cmd_cancel()
     elseif cmd == "results" || cmd == "res"
         return cmd_results()
+    elseif cmd == "processes" || cmd == "procs" || cmd == "ps"
+        return cmd_processes()
     elseif cmd == "kill"
         return cmd_kill()
     else
