@@ -222,7 +222,7 @@ end
 # All these take either a raw kind or a token.
 
 function is_plain_equals(t)
-    kind(t) == K"=" && !is_suffixed(t)
+    kind(t) == K"=" && !is_decorated(t)
 end
 
 function is_closing_token(ps::ParseState, k)
@@ -278,25 +278,25 @@ function is_syntactic_unary_op(k)
     kind(k) in KSet"$ & ::"
 end
 
-function is_type_operator(t, isdot)
-    kind(t) in KSet"<: >:" && !isdot
+function is_type_operator(t)
+    kind(t) in KSet"<: >:" && !is_dotted(t)
 end
 
-function is_unary_op(t, isdot)
+function is_unary_op(t)
     k = kind(t)
     !is_suffixed(t) && (
-        (k in KSet"<: >:" && !isdot) ||
+        (k in KSet"<: >:" && !is_dotted(t)) ||
         k in KSet"+ - ! ~ ¬ √ ∛ ∜ ⋆ ± ∓" # dotop allowed
     )
 end
 
 # Operators that are both unary and binary
-function is_both_unary_and_binary(t, isdot)
+function is_both_unary_and_binary(t)
     k = kind(t)
     # Preventing is_suffixed here makes this consistent with the flisp parser.
     # But is this by design or happenstance?
     !is_suffixed(t) && (
-        k in KSet"+ - ⋆ ± ∓" || (k in KSet"$ & ~" && !isdot)
+        k in KSet"+ - ⋆ ± ∓" || (k in KSet"$ & ~" && !is_dotted(t))
     )
 end
 
@@ -333,6 +333,26 @@ function was_eventually_call(ps::ParseState)
     end
 end
 
+function bump_dotsplit(ps, flags=EMPTY_FLAGS;
+                       emit_dot_node::Bool=false, remap_kind::Kind=K"None")
+    t = peek_token(ps)
+    if is_dotted(t)
+        bump_trivia(ps)
+        mark = position(ps)
+        k = remap_kind != K"None" ? remap_kind : kind(t)
+        pos = bump_split(ps, (1, K".", TRIVIA_FLAG), (-1, k, flags))
+        if emit_dot_node
+            pos = emit(ps, mark, K".")
+        end
+    else
+        if remap_kind != K"None"
+            pos = bump(ps, remap_kind=remap_kind)
+        else
+            pos = bump(ps)
+        end
+    end
+    return pos
+end
 
 #-------------------------------------------------------------------------------
 # Parser
@@ -352,13 +372,11 @@ end
 function parse_LtoR(ps::ParseState, down, is_op)
     mark = position(ps)
     down(ps)
-    while true
-        isdot, tk = peek_dotted_op_token(ps)
-        is_op(tk) || break
-        isdot && bump(ps, TRIVIA_FLAG) # TODO: NOTATION_FLAG
-        bump(ps, remap_kind=K"Identifier")
+    while is_op(peek(ps))
+        t = peek_token(ps)
+        bump_dotsplit(ps, remap_kind=K"Identifier")
         down(ps)
-        emit(ps, mark, isdot ? K"dotcall" : K"call", INFIX_FLAG)
+        emit(ps, mark, is_dotted(t) ? K"dotcall" : K"call", INFIX_FLAG)
     end
 end
 
@@ -369,11 +387,11 @@ end
 function parse_RtoL(ps::ParseState, down, is_op, self)
     mark = position(ps)
     down(ps)
-    isdot, tk = peek_dotted_op_token(ps)
-    if is_op(tk)
-        bump_dotted(ps, isdot, remap_kind=K"Identifier")
+    t = peek_token(ps)
+    if is_op(kind(t))
+        bump_dotsplit(ps, remap_kind=K"Identifier")
         self(ps)
-        emit(ps, mark, isdot ? K"dotcall" : K"call", INFIX_FLAG)
+        emit(ps, mark, is_dotted(t) ? K"dotcall" : K"call", INFIX_FLAG)
     end
 end
 
@@ -581,7 +599,7 @@ function parse_assignment(ps::ParseState, down)
 end
 
 function parse_assignment_with_initial_ex(ps::ParseState, mark, down::T) where {T} # where => specialize on `down`
-    isdot, t = peek_dotted_op_token(ps)
+    t = peek_token(ps)
     k = kind(t)
     if !is_prec_assignment(k)
         return
@@ -598,33 +616,38 @@ function parse_assignment_with_initial_ex(ps::ParseState, mark, down::T) where {
         # a .~ b     ==>  (dotcall-i a ~ b)
         # [a ~ b c]  ==>  (hcat (call-i a ~ b) c)
         # [a~b]      ==>  (vect (call-i a ~ b))
-        bump_dotted(ps, isdot, remap_kind=K"Identifier")
+        bump_dotsplit(ps, remap_kind=K"Identifier")
         bump_trivia(ps)
         parse_assignment(ps, down)
-        emit(ps, mark, isdot ? K"dotcall" : K"call", INFIX_FLAG)
+        emit(ps, mark, is_dotted(t) ? K"dotcall" : K"call", INFIX_FLAG)
     else
         # f() = 1  ==>  (function-= (call f) 1)
         # f() .= 1 ==>  (.= (call f) 1)
         # a += b   ==>  (+= a b)
         # a .= b   ==>  (.= a b)
-        is_short_form_func = k == K"=" && !isdot && was_eventually_call(ps)
+        is_short_form_func = k == K"=" && !is_dotted(t) && was_eventually_call(ps)
         if k == K"op="
             # x += y   ==>  (op= x + y)
             # x .+= y  ==>  (.op= x + y)
             bump_trivia(ps)
-            isdot && bump(ps, TRIVIA_FLAG) # TODO: NOTATION_FLAG
-            bump_split(ps,
-                        (-1, K"Identifier", EMPTY_FLAGS),  # op
-                        (1, K"=", TRIVIA_FLAG))
+            if is_dotted(t)
+                bump_split(ps, (1, K".", TRIVIA_FLAG),
+                           (-2, K"Identifier", EMPTY_FLAGS),  # op
+                           (1, K"=", TRIVIA_FLAG))
+            else
+                bump_split(ps,
+                           (-1, K"Identifier", EMPTY_FLAGS),  # op
+                           (1, K"=", TRIVIA_FLAG))
+            end
         else
-            bump_dotted(ps, isdot, TRIVIA_FLAG)
+            bump(ps, TRIVIA_FLAG)
         end
         bump_trivia(ps)
         # Syntax Edition TODO: We'd like to call `down` here when
         # is_short_form_func is true, to prevent `f() = 1 = 2` from parsing.
         parse_assignment(ps, down)
         emit(ps, mark,
-             is_short_form_func ? K"function" : (isdot ? dotted(k) : k),
+             is_short_form_func ? K"function" : k,
              is_short_form_func ? SHORT_FORM_FUNCTION_FLAG : flags(t))
     end
 end
@@ -730,10 +753,10 @@ end
 function parse_arrow(ps::ParseState)
     mark = position(ps)
     parse_or(ps)
-    isdot, t = peek_dotted_op_token(ps)
+    t = peek_token(ps)
     k = kind(t)
     if is_prec_arrow(k)
-        if kind(t) == K"-->" && !isdot && !is_suffixed(t)
+        if kind(t) == K"-->" && !is_decorated(t)
             # x --> y   ==>  (--> x y)           # The only syntactic arrow
             bump(ps, TRIVIA_FLAG)
             parse_arrow(ps)
@@ -743,24 +766,10 @@ function parse_arrow(ps::ParseState)
             # x <--> y  ==>  (call-i x <--> y)
             # x .--> y  ==>  (dotcall-i x --> y)
             # x -->₁ y  ==>  (call-i x -->₁ y)
-            bump_dotted(ps, isdot, remap_kind=K"Identifier")
+            bump_dotsplit(ps, remap_kind=K"Identifier")
             parse_arrow(ps)
-            emit(ps, mark, isdot ? K"dotcall" : K"call", INFIX_FLAG)
+            emit(ps, mark, is_dotted(t) ? K"dotcall" : K"call", INFIX_FLAG)
         end
-    end
-end
-
-function dotted(k)
-    if k == K"||"
-        return K".||"
-    elseif k == K"&&"
-        return K".&&"
-    elseif k == K"="
-        return K".="
-    elseif k == K"op="
-        return K".op="
-    else
-        error("Unexpected dotted operator: $k")
     end
 end
 
@@ -768,13 +777,13 @@ end
 function parse_lazy_cond(ps::ParseState, down, is_op, self)
     mark = position(ps)
     down(ps)
-    (isdot, t) = peek_dotted_op_token(ps)
+    t = peek_token(ps)
     k = kind(t)
     if is_op(k)
-        bump_dotted(ps, isdot, TRIVIA_FLAG)
+        bump(ps, TRIVIA_FLAG)
         self(ps)
-        emit(ps, mark, isdot ? dotted(k) : k, flags(t))
-        if isdot
+        emit(ps, mark, k, flags(t))
+        if is_dotted(t)
             min_supported_version(v"1.7", ps, mark, "dotted operators `.||` and `.&&`")
         end
     end
@@ -815,15 +824,15 @@ function parse_comparison(ps::ParseState, subtype_comparison=false)
     n_comparisons = 0
     op_pos = NO_POSITION
     op_dotted = false
-    (initial_dot, initial_tok) = peek_dotted_op_token(ps)
-    while ((isdot, t) = peek_dotted_op_token(ps); is_prec_comparison(t))
+    initial_tok = peek_token(ps)
+    while (t = peek_token(ps); is_prec_comparison(t))
         n_comparisons += 1
-        op_dotted = isdot
-        op_pos = bump_dotted(ps, isdot, emit_dot_node=true, remap_kind=K"Identifier")
+        op_dotted = is_dotted(t)
+        op_pos = bump_dotsplit(ps, emit_dot_node=true, remap_kind=K"Identifier")
         parse_pipe_lt(ps)
     end
     if n_comparisons == 1
-        if is_type_operator(initial_tok, initial_dot)
+        if is_type_operator(initial_tok)
             # Type comparisons are syntactic
             # x <: y  ==>  (<: x y)
             # x >: y  ==>  (>: x y)
@@ -834,10 +843,10 @@ function parse_comparison(ps::ParseState, subtype_comparison=false)
             # x < y    ==>  (call-i x < y)
             # x .< y   ==>  (dotcall-i x < y)
             if op_dotted
-                # Reset the extra (non-terminal) K"." (e.g. in `(. <)`) node to just `. <`
+                # x .<: y  ==>  (dotcall-i x <: y)
                 reset_node!(ps, op_pos, kind=K"TOMBSTONE", flags=TRIVIA_FLAG)
             end
-            emit(ps, mark, op_dotted ? K"dotcall" : K"call", INFIX_FLAG)
+            emit(ps, mark, is_dotted(initial_tok) ? K"dotcall" : K"call", INFIX_FLAG)
         end
     elseif n_comparisons > 1
         # Comparison chains
@@ -873,15 +882,15 @@ end
 function parse_range(ps::ParseState)
     mark = position(ps)
     parse_invalid_ops(ps)
-    (initial_dot, initial_tok) = peek_dotted_op_token(ps)
+    initial_tok = peek_token(ps)
     initial_kind = kind(initial_tok)
     if initial_kind != K":" && is_prec_colon(initial_kind)
         # a..b     ==>   (call-i a .. b)
         # a … b    ==>   (call-i a … b)
         # a .… b    ==>  (dotcall-i a … b)
-        bump_dotted(ps, initial_dot, remap_kind=K"Identifier")
+        bump_dotsplit(ps, remap_kind=K"Identifier")
         parse_invalid_ops(ps)
-        emit(ps, mark, initial_dot ? K"dotcall" : K"call", INFIX_FLAG)
+        emit(ps, mark, is_dotted(initial_tok) ? K"dotcall" : K"call", INFIX_FLAG)
     elseif initial_kind == K":" && ps.range_colon_enabled
         # a ? b : c:d   ==>   (? a b (call-i c : d))
         n_colons = 0
@@ -963,11 +972,11 @@ end
 function parse_invalid_ops(ps::ParseState)
     mark = position(ps)
     parse_expr(ps)
-    while ((isdot, t) = peek_dotted_op_token(ps); kind(t) in KSet"ErrorInvalidOperator Error**")
+    while (t = peek_token(ps); kind(t) in KSet"ErrorInvalidOperator Error**")
         bump_trivia(ps)
-        bump_dotted(ps, isdot)
+        bump_dotsplit(ps)
         parse_expr(ps)
-        emit(ps, mark, isdot ? K"dotcall" : K"call", INFIX_FLAG)
+        emit(ps, mark, is_dotted(t) ? K"dotcall" : K"call", INFIX_FLAG)
     end
 end
 
@@ -993,9 +1002,9 @@ end
 function parse_with_chains(ps::ParseState, down, is_op, chain_ops)
     mark = position(ps)
     down(ps)
-    while ((isdot, t) = peek_dotted_op_token(ps); is_op(kind(t)))
+    while (t = peek_token(ps); is_op(kind(t)))
         if ps.space_sensitive && preceding_whitespace(t) &&
-                is_both_unary_and_binary(t, isdot) &&
+                is_both_unary_and_binary(t) &&
                 !preceding_whitespace(peek_token(ps, 2))
             # The following is two elements of a hcat
             # [x +y]     ==>  (hcat x (call-pre + y))
@@ -1006,16 +1015,16 @@ function parse_with_chains(ps::ParseState, down, is_op, chain_ops)
             # [x+y + z]  ==>  (vect (call-i x + y z))
             break
         end
-        bump_dotted(ps, isdot, remap_kind=K"Identifier")
+        bump_dotsplit(ps, remap_kind=K"Identifier")
         down(ps)
-        if kind(t) in chain_ops && !is_suffixed(t) && !isdot
+        if kind(t) in chain_ops && !is_decorated(t)
             # a + b + c    ==>  (call-i a + b c)
             # a + b .+ c   ==>  (dotcall-i (call-i a + b) + c)
             parse_chain(ps, down, kind(t))
         end
         # a +₁ b +₁ c  ==>  (call-i (call-i a +₁ b) +₁ c)
         # a .+ b .+ c  ==>  (dotcall-i (dotcall-i a + b) + c)
-        emit(ps, mark, isdot ? K"dotcall" : K"call", INFIX_FLAG)
+        emit(ps, mark, is_dotted(t) ? K"dotcall" : K"call", INFIX_FLAG)
     end
 end
 
@@ -1023,13 +1032,9 @@ end
 #
 # flisp: parse-chain
 function parse_chain(ps::ParseState, down, op_kind)
-    while true
-        isdot, t = peek_dotted_op_token(ps)
-        if kind(t) != op_kind || is_suffixed(t) || isdot
-            break
-        end
+    while (t = peek_token(ps); kind(t) == op_kind && !is_decorated(t))
         if ps.space_sensitive && preceding_whitespace(t) &&
-            is_both_unary_and_binary(t, false) &&
+            is_both_unary_and_binary(t) &&
             !preceding_whitespace(peek_token(ps, 2))
             # [x +y]  ==>  (hcat x (call-pre + y))
             break
@@ -1056,7 +1061,7 @@ end
 # flisp: parse-unary-subtype
 function parse_unary_subtype(ps::ParseState)
     t = peek_token(ps)
-    if is_type_operator(t, false)
+    if is_type_operator(t)
         k2 = peek(ps, 2)
         if is_closing_token(ps, k2) || k2 in KSet"NewlineWs ="
             # return operator by itself
@@ -1098,8 +1103,8 @@ function parse_where_chain(ps0::ParseState, mark)
             # x where {y for y in ys}  ==>  (where x (braces (generator y (iteration (in y ys)))))
             m = position(ps)
             bump(ps, TRIVIA_FLAG)
-            ckind, cflags, dim = parse_cat(ps, K"}", ps.end_symbol)
-            emit_braces(ps, m, ckind, cflags, dim)
+            ckind, cflags = parse_cat(ps, K"}", ps.end_symbol)
+            emit_braces(ps, m, ckind, cflags)
             emit(ps, mark, K"where")
         else
             # x where T     ==>  (where x T)
@@ -1191,13 +1196,13 @@ end
 function parse_unary(ps::ParseState)
     mark = position(ps)
     bump_trivia(ps)
-    (op_dotted, op_t) = peek_dotted_op_token(ps)
+    op_t = peek_token(ps)
     op_k = kind(op_t)
     if (
             !is_operator(op_k)           ||
             is_word_operator(op_k)       ||
             (op_k in KSet": ' .'")       ||
-            (is_syntactic_unary_op(op_k) && !op_dotted) ||
+            (is_syntactic_unary_op(op_k) && !is_dotted(op_t)) ||
             is_syntactic_operator(op_k)
         )
         # `op_t` is not an initial operator
@@ -1207,9 +1212,9 @@ function parse_unary(ps::ParseState)
         parse_factor(ps)
         return
     end
-    t2 = peek_token(ps, 2+op_dotted)
+    t2 = peek_token(ps, 2)
     k2 = kind(t2)
-    if op_k in KSet"- +" && !is_suffixed(op_t) && !op_dotted
+    if op_k in KSet"- +" && !is_decorated(op_t)
         if !preceding_whitespace(t2) && (k2 in KSet"Integer Float Float32" ||
                                          (op_k == K"+" && k2 in KSet"BinInt HexInt OctInt"))
 
@@ -1244,7 +1249,7 @@ function parse_unary(ps::ParseState)
         # .+   ==>  (. +)
         # .&   ==>  (. &)
         parse_atom(ps)
-    elseif k2 == K"{" || (!is_unary_op(op_t, op_dotted) && k2 == K"(")
+    elseif k2 == K"{" || (!is_unary_op(op_t) && k2 == K"(")
         # Call with type parameters or non-unary prefix call
         # +{T}(x::T)  ==>  (call (curly + T) (:: x T))
         # *(x)  ==>  (call * x)
@@ -1258,7 +1263,7 @@ function parse_unary(ps::ParseState)
         #
         # (The flisp parser only considers commas before `;` and thus gets this
         # last case wrong)
-        op_pos = bump_dotted(ps, op_dotted, emit_dot_node=true, remap_kind=K"Identifier")
+        op_pos = bump_dotsplit(ps, emit_dot_node=true, remap_kind=K"Identifier")
 
         space_before_paren = preceding_whitespace(t2)
         if space_before_paren
@@ -1302,7 +1307,7 @@ function parse_unary(ps::ParseState)
             # Prefix calls have higher precedence than ^
             # +(a,b)^2  ==>  (call-i (call + a b) ^ 2)
             # +(a,b)(x)^2  ==>  (call-i (call (call + a b) x) ^ 2)
-            if is_type_operator(op_t, op_dotted)
+            if is_type_operator(op_t)
                 # <:(a,)  ==>  (<: a)
                 emit(ps, mark, op_k, opts.delim_flags)
                 reset_node!(ps, op_pos, flags=TRIVIA_FLAG, kind=op_k)
@@ -1328,14 +1333,13 @@ function parse_unary(ps::ParseState)
             # +(a)(x,y)^2  ==>  (call-pre + (call-i (call (parens a) x y) ^ 2))
             parse_call_chain(ps, mark_before_paren)
             parse_factor_with_initial_ex(ps, mark_before_paren)
-            if is_type_operator(op_t, op_dotted)
+            if is_type_operator(op_t)
                 # <:(a)  ==>  (<:-pre (parens a))
                 emit(ps, mark, op_k, PREFIX_OP_FLAG)
                 reset_node!(ps, op_pos, flags=TRIVIA_FLAG, kind=op_k)
             else
-                if op_dotted
+                if is_dotted(op_t)
                     emit(ps, mark, K"dotcall", PREFIX_OP_FLAG)
-                    # Reset the extra (non-terminal) K"." (e.g. in `(. +)`) node to just `. +`
                     reset_node!(ps, op_pos, kind=K"TOMBSTONE")
                 else
                     emit(ps, mark, K"call", PREFIX_OP_FLAG)
@@ -1343,7 +1347,7 @@ function parse_unary(ps::ParseState)
             end
         end
     else
-        if is_unary_op(op_t, op_dotted)
+        if is_unary_op(op_t)
             # Normal unary calls
             # +x  ==>  (call-pre + x)
             # √x  ==>  (call-pre √ x)
@@ -1352,20 +1356,20 @@ function parse_unary(ps::ParseState)
             # -0x1 ==> (call-pre - 0x01)
             # - 2  ==> (call-pre - 2)
             # .-2  ==> (dotcall-pre - 2)
-            op_pos = bump_dotted(ps, op_dotted, remap_kind=K"Identifier")
+            op_pos = bump_dotsplit(ps, EMPTY_FLAGS, remap_kind=K"Identifier")
         else
             # /x     ==>  (call-pre (error /) x)
             # +₁ x   ==>  (call-pre (error +₁) x)
             # .<: x  ==>  (dotcall-pre (error (. <:)) x)
-            bump_dotted(ps, op_dotted, emit_dot_node=true, remap_kind=K"Identifier")
+            bump_dotsplit(ps, EMPTY_FLAGS, emit_dot_node=true, remap_kind=K"Identifier")
             op_pos = emit(ps, mark, K"error", error="not a unary operator")
         end
         parse_unary(ps)
-        if is_type_operator(op_t, op_dotted)
+        if is_type_operator(op_t)
             reset_node!(ps, op_pos, flags=TRIVIA_FLAG)
             emit(ps, mark, op_k, PREFIX_OP_FLAG)
         else
-            emit(ps, mark, op_dotted ? K"dotcall" : K"call", PREFIX_OP_FLAG)
+            emit(ps, mark, is_dotted(op_t) ? K"dotcall" : K"call", PREFIX_OP_FLAG)
         end
     end
 end
@@ -1387,10 +1391,10 @@ end
 # flisp: parse-factor-with-initial-ex
 function parse_factor_with_initial_ex(ps::ParseState, mark)
     parse_decl_with_initial_ex(ps, mark)
-    if ((isdot, t) = peek_dotted_op_token(ps); is_prec_power(kind(t)))
-        bump_dotted(ps, isdot, remap_kind=K"Identifier")
+    if (t = peek_token(ps); is_prec_power(kind(t)))
+        bump_dotsplit(ps, remap_kind=K"Identifier")
         parse_factor_after(ps)
-        emit(ps, mark, isdot ? K"dotcall" : K"call", INFIX_FLAG)
+        emit(ps, mark, is_dotted(t) ? K"dotcall" : K"call", INFIX_FLAG)
     end
 end
 
@@ -1418,7 +1422,7 @@ function parse_decl_with_initial_ex(ps::ParseState, mark)
             # (x) -> y
             # (x; a=1) -> y
         elseif kb == K"where"
-            # `where` and `->` have the "wrong" precedence when writing anon functions.
+            # `where` and `->` have the "wrong" precedence when writing anon functons.
             # So ignore this case to allow use of grouping brackets with `where`.
             # This needs to worked around in lowering :-(
             # (x where T) -> y  ==>  (-> (x where T) y)
@@ -1459,9 +1463,9 @@ end
 # flisp: parse-unary-prefix
 function parse_unary_prefix(ps::ParseState, has_unary_prefix=false)
     mark = position(ps)
-    (isdot, t) = peek_dotted_op_token(ps)
+    t = peek_token(ps)
     k = kind(t)
-    if is_syntactic_unary_op(k) && !isdot
+    if is_syntactic_unary_op(k) && !is_dotted(t)
         k2 = peek(ps, 2)
         if k in KSet"& $" && (is_closing_token(ps, k2) || k2 == K"NewlineWs")
             # &)   ==>  &
@@ -1488,13 +1492,6 @@ function parse_unary_prefix(ps::ParseState, has_unary_prefix=false)
     end
 end
 
-function maybe_parsed_macro_name(ps, processing_macro_name, mark)
-    if processing_macro_name
-        emit(ps, mark, K"macro_name")
-    end
-    return false
-end
-
 # Parses a chain of suffixes at function call precedence, leftmost binding
 # tightest. This handles
 #  * Bracketed calls like a() b[] c{}
@@ -1512,15 +1509,13 @@ function parse_call_chain(ps::ParseState, mark, is_macrocall=false)
         # 2(x) ==> (* 2 x)
         return
     end
-    processing_macro_name = is_macrocall
-    saw_misplaced_atsym = false
-    misplaced_atsym_mark = nothing
     # source range of the @-prefixed part of a macro
     macro_atname_range = nothing
-    # $A.@x  ==>  (macrocall (. ($ A) (macro_name x)))
+    # $A.@x  ==>  (macrocall (. ($ A) @x))
     maybe_strmac = true
-    last_identifier_pos = peek_behind_pos(ps)
-    last_identifier_orig_kind = peek_behind(ps, last_identifier_pos).orig_kind
+    # We record the last component of chains of dot-separated identifiers so we
+    # know which identifier was the macro name.
+    macro_name_position = position(ps) # points to same output span as peek_behind
     while true
         maybe_strmac_1 = false
         t = peek_token(ps)
@@ -1532,34 +1527,33 @@ function parse_call_chain(ps::ParseState, mark, is_macrocall=false)
             break
         elseif is_macrocall && (preceding_whitespace(t) || !(k in KSet"( [ { ' ."))
             # Macro calls with space-separated arguments
-            # @foo a b    ==> (macrocall (macro_name foo) a b)
-            # @foo (x)    ==> (macrocall (macro_name foo) (parens x))
-            # @foo (x,y)  ==> (macrocall (macro_name foo) (tuple-p x y))
-            # [@foo x]    ==> (vect (macrocall (macro_name foo) x))
-            # [@foo]      ==> (vect (macrocall (macro_name foo)))
-            # @var"#" a   ==> (macrocall (macro_name (var #)) a)
-            # A.@x y      ==> (macrocall (. A (macro_name x)) y)
-            # A.@var"#" a ==> (macrocall (. A (macro_name (var #))) a)
-            # @+x y       ==> (macrocall (macro_name +) x y)
-            # A.@.x       ==> (macrocall (. A (macro_name .)) x)
-            processing_macro_name = maybe_parsed_macro_name(
-                ps, processing_macro_name, mark)
+            # @foo a b    ==> (macrocall @foo a b)
+            # @foo (x)    ==> (macrocall @foo (parens x))
+            # @foo (x,y)  ==> (macrocall @foo (tuple-p x y))
+            # [@foo x]    ==> (vect (macrocall @foo x))
+            # [@foo]      ==> (vect (macrocall @foo))
+            # @var"#" a   ==> (macrocall (var @#) a)
+            # A.@x y      ==> (macrocall (. A @x) y)
+            # A.@var"#" a ==> (macrocall (. A (var @#)) a)
+            # @+x y       ==> (macrocall @+ x y)
+            # A.@.x       ==> (macrocall (. A @.) x)
+            fix_macro_name_kind!(ps, macro_name_position)
             let ps = with_space_sensitive(ps)
                 # Space separated macro arguments
-                # A.@foo a b    ==> (macrocall (. A (macro_name foo)) a b)
-                # @A.foo a b    ==> (macrocall (macro_name (. A foo)) a b)
+                # A.@foo a b    ==> (macrocall (. A @foo) a b)
+                # @A.foo a b    ==> (macrocall (. A @foo) a b)
                 n_args = parse_space_separated_exprs(ps)
-                is_doc_macro = last_identifier_orig_kind == K"doc"
+                is_doc_macro = peek_behind(ps, macro_name_position).orig_kind == K"doc"
                 if is_doc_macro && n_args == 1
                     # Parse extended @doc args on next line
-                    # @doc x\ny      ==>  (macrocall (macro_name doc) x y)
-                    # A.@doc x\ny    ==>  (macrocall (. A (macro_name doc)) x y)
-                    # @A.doc x\ny    ==>  (macrocall (macro_name (. A doc)) x y)
-                    # @doc x y\nz    ==>  (macrocall (macro_name doc) x y)
+                    # @doc x\ny      ==>  (macrocall @doc x y)
+                    # A.@doc x\ny    ==>  (macrocall (. A @doc) doc x y)
+                    # @A.doc x\ny    ==>  (macrocall (. A @doc) doc x y)
+                    # @doc x y\nz    ==>  (macrocall @doc x y)
                     #
                     # Excluded cases
-                    # @doc x\n\ny    ==>  (macrocall (macro_name doc) x)
-                    # @doc x\nend    ==>  (macrocall (macro_name doc) x)
+                    # @doc x\n\ny    ==>  (macrocall @doc x)
+                    # @doc x\nend    ==>  (macrocall @doc x)
                     k2 = peek(ps, 2)
                     if peek(ps) == K"NewlineWs" && !is_closing_token(ps, k2) &&
                             k2 != K"NewlineWs"
@@ -1576,8 +1570,6 @@ function parse_call_chain(ps::ParseState, mark, is_macrocall=false)
             # f(a; b; c)  ==> (call f a (parameters b) (parameters c))
             # (a=1)()  ==>  (call (parens (= a 1)))
             # f (a)    ==>  (call f (error-t) a)
-            processing_macro_name = maybe_parsed_macro_name(
-                ps, processing_macro_name, mark)
             bump_disallowed_space(ps)
             bump(ps, TRIVIA_FLAG)
             opts = parse_call_arglist(ps, K")")
@@ -1589,31 +1581,30 @@ function parse_call_chain(ps::ParseState, mark, is_macrocall=false)
                  # TODO: Add PARENS_FLAG to all calls which use them?
                  (is_macrocall ? PARENS_FLAG : EMPTY_FLAGS)|opts.delim_flags)
             if is_macrocall
-                # @x(a, b)   ==>  (macrocall-p (macro_name x) a b)
-                # A.@x(y)    ==>  (macrocall-p (. A (macro_name x)) y)
-                # A.@x(y).z  ==>  (. (macrocall-p (. A (macro_name x)) y) z)
+                # @x(a, b)   ==>  (macrocall-p @x a b)
+                # A.@x(y)    ==>  (macrocall-p (. A @x) y)
+                # A.@x(y).z  ==>  (. (macrocall-p (. A @x) y) z)
+                fix_macro_name_kind!(ps, macro_name_position)
                 is_macrocall = false
-                # @f()()     ==>  (call (macrocall-p (macro_name f)))
                 macro_atname_range = nothing
             end
         elseif k == K"["
-            processing_macro_name = maybe_parsed_macro_name(
-                ps, processing_macro_name, mark)
             m = position(ps)
             # a [i]  ==>  (ref a (error-t) i)
             bump_disallowed_space(ps)
             bump(ps, TRIVIA_FLAG)
-            ckind, cflags, dim = parse_cat(ParseState(ps, end_symbol=true),
+            ckind, cflags = parse_cat(ParseState(ps, end_symbol=true),
                                       K"]", ps.end_symbol)
             if is_macrocall
-                # @S[a,b]  ==>  (macrocall (macro_name S) (vect a b))
-                # @S[a b]  ==>  (macrocall (macro_name S) (hcat a b))
-                # @S[a; b] ==>  (macrocall (macro_name S) (vcat a b))
-                # A.@S[a]  ==>  (macrocall (. A (macro_name S)) (vect a))
-                # @S[a].b  ==>  (. (macrocall (macro_name S) (vect a)) b)
-                #v1.7: @S[a ;; b]  ==>  (macrocall (macro_name S) (ncat-2 a b))
-                #v1.6: @S[a ;; b]  ==>  (macrocall (macro_name S) (error (ncat-2 a b)))
-                emit(ps, m, ckind, cflags | set_numeric_flags(dim))
+                # @S[a,b]  ==>  (macrocall @S (vect a b))
+                # @S[a b]  ==>  (macrocall @S (hcat a b))
+                # @S[a; b] ==>  (macrocall @S (vcat a b))
+                # A.@S[a]  ==>  (macrocall (. A @S) (vect a))
+                # @S[a].b  ==>  (. (macrocall @S (vect a)) b)
+                #v1.7: @S[a ;; b]  ==>  (macrocall @S (ncat-2 a b))
+                #v1.6: @S[a ;; b]  ==>  (macrocall @S (error (ncat-2 a b)))
+                fix_macro_name_kind!(ps, macro_name_position)
+                emit(ps, m, ckind, cflags)
                 check_ncat_compat(ps, m, ckind)
                 emit(ps, mark, K"macrocall")
                 is_macrocall = false
@@ -1634,40 +1625,28 @@ function parse_call_chain(ps::ParseState, mark, is_macrocall=false)
                        ckind == K"comprehension" ? K"typed_comprehension"  :
                        ckind == K"ncat"          ? K"typed_ncat"           :
                        internal_error("unrecognized kind in parse_cat ", string(ckind))
-                emit(ps, mark, outk, cflags | set_numeric_flags(dim))
+                emit(ps, mark, outk, cflags)
                 check_ncat_compat(ps, mark, ckind)
             end
         elseif k == K"."
-            # Check if this is a dotted operator, not field access
-            k2 = peek(ps, 2)
-            if is_operator(k2) && !is_word_operator(k2) && k2 != K":" && k2 != K"$" && k2 != K"'" && k2 != K"?"
-                # This is a dotted operator like .=, .+, etc., not field access
-                # Let the appropriate parser handle it
-                break
-            end
             # x .y  ==>  (. x (error-t) y)
             bump_disallowed_space(ps)
             emark = position(ps)
             if !isnothing(macro_atname_range)
                 # Allow `@` in macrocall only in first and last position
-                # A.B.@x  ==>  (macrocall (. (. A B) (macro_name x)))
-                # @A.B.x  ==>  (macrocall (macro_name (. (. A B) x)))
-                # A.@B.x  ==>  (macrocall (. (. A (error-t) B) (macro_name (error-t) x)))
+                # A.B.@x  ==>  (macrocall (. (. A B) @x))
+                # @A.B.x  ==>  (macrocall (. (. A B) @x))
+                # A.@B.x  ==>  (macrocall (. (. A B (error-t)) @x))
                 emit_diagnostic(ps, macro_atname_range...,
                     error="`@` must appear on first or last macro name component")
-                # Recover by treating the `@` as if it had been on the last identifier
-                saw_misplaced_atsym = true
-                reset_node!(ps, macro_atname_range[2], kind=K"TOMBSTONE")
-                reset_node!(ps, macro_atname_range[1], kind=K"error")
+                bump(ps, TRIVIA_FLAG, error="Unexpected `.` after macro name")
+            else
+                bump(ps, TRIVIA_FLAG)
             end
-            bump(ps, TRIVIA_FLAG)
             k = peek(ps)
             if k == K"("
                 if is_macrocall
-                    # Recover by pretending we do have the syntax
-                    processing_macro_name = maybe_parsed_macro_name(
-                        ps, processing_macro_name, mark)
-                    # @M.(x)  ==> (macrocall (dotcall (macro_name M) (error-t) x))
+                    # @M.(x)  ==> (macrocall (dotcall @M (error-t) x))
                     bump_invisible(ps, K"error", TRIVIA_FLAG)
                     emit_diagnostic(ps, mark,
                                     error="dot call syntax not supported for macros")
@@ -1690,66 +1669,42 @@ function parse_call_chain(ps::ParseState, mark, is_macrocall=false)
             elseif k == K"$"
                 # f.$x      ==>  (. f ($ x))
                 # f.$(x+y)  ==>  (. f ($ (call + x y)))
-                # A.$B.@x   ==>  (macrocall (. (. A ($ B)) (macro_name x)))
-                # @A.$x a   ==>  (macrocall (macro_name (. A (error x))) a)
+                # A.$B.@x   ==>  (macrocall (. (. A ($ B)) @x))
+                # @A.$x a   ==>  (macrocall (. A (error x)) a)
                 m = position(ps)
                 bump(ps, TRIVIA_FLAG)
                 parse_atom(ps)
-                if is_macrocall
-                    emit(ps, m, K"error", error="invalid macro name")
-                else
-                    emit(ps, m, K"$")
-                end
-                last_identifier_orig_kind = K"$"
+                emit(ps, m, K"$")
+                macro_name_position = position(ps)
                 emit(ps, mark, K".")
             elseif k == K"@"
                 # A macro call after some prefix A has been consumed
-                # A.@x    ==>  (macrocall (. A (macro_name x)))
-                # A.@x a  ==>  (macrocall (. A (macro_name x)) a)
+                # A.@x    ==>  (macrocall (. A @x))
+                # A.@x a  ==>  (macrocall (. A @x) a)
                 m = position(ps)
                 if is_macrocall
-                    # @A.B.@x a ==> (macrocall (. (. A B) (error-t) (macro_name x)) a)
+                    # @A.B.@x a ==> (macrocall (. (. A B) (error-t) @x) a)
                     bump(ps, TRIVIA_FLAG, error="repeated `@` in macro module path")
                 else
                     bump(ps, TRIVIA_FLAG)
+                    is_macrocall = true
                 end
                 parse_macro_name(ps)
-                last_identifier_pos = peek_behind_pos(ps)
-                last_identifier_orig_kind = peek_behind(ps, last_identifier_pos).orig_kind
-                !is_macrocall && emit(ps, m, K"macro_name")
+                macro_name_position = position(ps)
                 macro_atname_range = (m, position(ps))
-                is_macrocall = true
                 emit(ps, mark, K".")
             elseif k == K"'"
-                # f.'  =>  (dotcall-post f (error '))
-                bump(ps, remap_kind=K"Identifier")  # bump '
+                # f.'  =>  f (error-t (. '))
+                bump_dotsplit(ps, remap_kind=K"Identifier")
                 # TODO: Reclaim dotted postfix operators :-)
                 emit(ps, emark, K"error",
                      error="the .' operator for transpose is discontinued")
                 emit(ps, mark, K"dotcall", POSTFIX_OP_FLAG)
             else
-                if saw_misplaced_atsym
-                    # If we saw a misplaced `@` earlier, this might be the place
-                    # where it should have been. Opportunistically bump the
-                    # zero-width error token here. If that's not right, we'll
-                    # reset it later.
-                    if misplaced_atsym_mark !== nothing
-                        reset_node!(ps, misplaced_atsym_mark[1], kind=K"TOMBSTONE")
-                        reset_node!(ps, misplaced_atsym_mark[2], kind=K"TOMBSTONE")
-                    end
-                    macro_name_mark = position(ps)
-                    bump_invisible(ps, K"error", TRIVIA_FLAG)
-                    aterror_mark = position(ps)
-                end
                 # Field/property syntax
                 # f.x.y ==> (. (. f x) y)
                 parse_atom(ps, false)
-                if saw_misplaced_atsym
-                    emit(ps, macro_name_mark, K"macro_name")
-                    misplaced_atsym_mark = (aterror_mark, position(ps))
-                end
-                last_identifier_pos = peek_behind_pos(ps)
-                last_identifier_orig_kind = peek_behind(ps, last_identifier_pos).orig_kind
+                macro_name_position = position(ps)
                 maybe_strmac_1 = true
                 emit(ps, mark, K".")
             end
@@ -1759,8 +1714,6 @@ function parse_call_chain(ps::ParseState, mark, is_macrocall=false)
             bump(ps, remap_kind=K"Identifier")
             emit(ps, mark, K"call", POSTFIX_OP_FLAG)
         elseif k == K"{"
-            processing_macro_name = maybe_parsed_macro_name(
-                ps, processing_macro_name, mark)
             # Type parameter curlies and macro calls
             m = position(ps)
             # S {a} ==> (curly S (error-t) a)
@@ -1768,9 +1721,10 @@ function parse_call_chain(ps::ParseState, mark, is_macrocall=false)
             bump(ps, TRIVIA_FLAG)
             opts = parse_call_arglist(ps, K"}")
             if is_macrocall
-                # @S{a,b} ==> (macrocall (macro_name S) (braces a b))
-                # A.@S{a}  ==> (macrocall (. A (macro_name S)) (braces a))
-                # @S{a}.b  ==> (. (macrocall (macro_name S) (braces a)) b)
+                # @S{a,b} ==> (macrocall S (braces a b))
+                # A.@S{a}  ==> (macrocall (. A @S) (braces a))
+                # @S{a}.b  ==> (. (macrocall @S (braces a)) b)
+                fix_macro_name_kind!(ps, macro_name_position)
                 emit(ps, m, K"braces", opts.delim_flags)
                 emit(ps, mark, K"macrocall")
                 min_supported_version(v"1.6", ps, mark, "macro call without space before `{}`")
@@ -1783,7 +1737,7 @@ function parse_call_chain(ps::ParseState, mark, is_macrocall=false)
         elseif k in KSet" \" \"\"\" ` ``` " &&
                 !preceding_whitespace(t) && maybe_strmac &&
                 (# Must mirror the logic in lex_quote() for consistency
-                 origk = last_identifier_orig_kind;
+                 origk = peek_behind(ps, macro_name_position).orig_kind;
                  origk == K"Identifier" || is_contextual_keyword(origk) || is_word_operator(origk))
             # Custom string and command literals
             # x"str" ==> (macrocall @x_str (string-r "str"))
@@ -1797,8 +1751,8 @@ function parse_call_chain(ps::ParseState, mark, is_macrocall=false)
             #
             # Use a special token kind for string and cmd macro names so the
             # names can be expanded later as necessary.
-            name_kind = is_string_delim(k) ? K"StrMacroName" : K"CmdMacroName"
-            reset_node!(ps, last_identifier_pos, kind=name_kind)
+            outk = is_string_delim(k) ? K"StringMacroName" : K"CmdMacroName"
+            fix_macro_name_kind!(ps, macro_name_position, outk)
             parse_string(ps, true)
             t = peek_token(ps)
             k = kind(t)
@@ -2076,13 +2030,13 @@ function parse_resword(ps::ParseState)
              word == K"baremodule" ? BARE_MODULE_FLAG : EMPTY_FLAGS)
     elseif word in KSet"export public"
         # export a         ==>  (export a)
-        # export @a        ==>  (export (macro_name a))
-        # export a, \n @b  ==>  (export a (macro_name b))
+        # export @a        ==>  (export @a)
+        # export a, \n @b  ==>  (export a @b)
         # export +, ==     ==>  (export + ==)
         # export \n a      ==>  (export a)
         # export \$a, \$(a*b) ==> (export (\$ a) (\$ (parens (call-i a * b))))
         bump(ps, TRIVIA_FLAG)
-        parse_comma_separated(ps, x->parse_import_atsym(x, false))
+        parse_comma_separated(ps, x->parse_atsym(x, false))
         emit(ps, mark, word)
     elseif word in KSet"import using"
         parse_imports(ps)
@@ -2148,7 +2102,7 @@ end
 function parse_global_local_const_vars(ps)
     mark = position(ps)
     n_commas = parse_comma(ps, false)
-    (isdot, t) = peek_dotted_op_token(ps)
+    t = peek_token(ps)
     if is_prec_assignment(t)
         if n_commas >= 1
             # const x,y = 1,2  ==>  (const (= (tuple x y) (tuple 1 2)))
@@ -2161,7 +2115,7 @@ function parse_global_local_const_vars(ps)
     else
         # global x,y   ==>  (global x y)
     end
-    return kind(t) == K"=" && !isdot
+    return kind(t) == K"=" && !is_dotted(t)
 end
 
 # Parse function and macro definitions
@@ -2199,18 +2153,13 @@ function parse_function_signature(ps::ParseState, is_function::Bool)
             is_empty_tuple = peek(ps, skip_newlines=true) == K")"
             opts = parse_brackets(ps, K")") do had_commas, had_splat, num_semis, num_subexprs
                 _parsed_call = was_eventually_call(ps)
-                _maybe_grouping_parens = !had_commas && !had_splat && num_semis == 0 && num_subexprs == 1
-                # Skip intervening newlines only when the parentheses hold a single
-                # expression, which is the ambiguous case between a name like (::T)
-                # and an anonymous function parameter list.
-                next_kind = peek(ps, 2, skip_newlines=_maybe_grouping_parens)
-                _needs_parse_call = next_kind ∈ KSet"( ."
+                _needs_parse_call = peek(ps, 2) ∈ KSet"( ."
                 _is_anon_func = (!_needs_parse_call && !_parsed_call) || had_commas
-                return (needs_parameters      = _is_anon_func,
-                        is_anon_func          = _is_anon_func,
-                        parsed_call           = _parsed_call,
-                        needs_parse_call      = _needs_parse_call,
-                        maybe_grouping_parens = _maybe_grouping_parens)
+                return (needs_parameters = _is_anon_func,
+                        is_anon_func     = _is_anon_func,
+                        parsed_call      = _parsed_call,
+                        needs_parse_call = _needs_parse_call,
+                        maybe_grouping_parens = !had_commas && !had_splat && num_semis == 0 && num_subexprs == 1)
             end
             is_anon_func = opts.is_anon_func
             parsed_call = opts.parsed_call
@@ -2420,12 +2369,43 @@ function _is_valid_macro_name(peektok)
     return !is_error(peektok.kind) && (peektok.is_leaf || peektok.kind == K"var")
 end
 
+function fix_macro_name_kind!(ps::ParseState, macro_name_position, name_kind=nothing)
+    k = peek_behind(ps, macro_name_position).kind
+    if k == K"var"
+        macro_name_position = first_child_position(ps, macro_name_position)
+        k = peek_behind(ps, macro_name_position).kind
+    elseif k == K"parens"
+        # @(A) x  ==>  (macrocall (parens @A) x)
+        macro_name_position = first_child_position(ps, macro_name_position)
+        if macro_name_position == NO_POSITION
+            return
+        end
+        k = peek_behind(ps, macro_name_position).kind
+    elseif k == K"error"
+        # Error already reported in parse_macro_name
+        return
+    end
+    if isnothing(name_kind)
+        name_kind = _is_valid_macro_name(peek_behind(ps, macro_name_position)) ?
+                    K"MacroName" : K"error"
+        if name_kind == K"error"
+            # TODO: This isn't quite accurate
+            emit_diagnostic(ps, macro_name_position, macro_name_position,
+                            error="invalid macro name")
+        end
+    end
+    reset_node!(ps, macro_name_position, kind=name_kind)
+end
+
+# If remap_kind is false, the kind will be remapped by parse_call_chain after
+# it discovers which component of the macro's module path is the macro name.
+#
 # flisp: parse-macro-name
 function parse_macro_name(ps::ParseState)
     # @! x   ==>  (macrocall @! x)
-    # @.. x  ==>  (macrocall (macro_name ..) x)
-    # @$ x   ==>  (macrocall (macro_name $) x)
-    # @var"#" x   ==>  (macrocall (macro_name (var #)) x)
+    # @.. x  ==>  (macrocall @.. x)
+    # @$ x   ==>  (macrocall @$ x)
+    # @var"#" x   ==>  (macrocall (var @#) x)
     bump_disallowed_space(ps)
     mark = position(ps)
     parse_atom(ps, false)
@@ -2434,7 +2414,7 @@ function parse_macro_name(ps::ParseState)
         emit_diagnostic(ps, mark,
             warning="parenthesizing macro names is unnecessary")
     elseif !_is_valid_macro_name(b)
-        # @[x] y z  ==>  (macrocall (macro_name (error (vect x))) y z)
+        # @[x] y z  ==>  (macrocall (error (vect x)) y z)
         emit(ps, mark, K"error", error="invalid macro name")
     end
 end
@@ -2442,16 +2422,15 @@ end
 # Parse an identifier, interpolation or @-prefixed symbol
 #
 # flisp: parse-atsym
-function parse_import_atsym(ps::ParseState, allow_quotes=true)
+function parse_atsym(ps::ParseState, allow_quotes=true)
     bump_trivia(ps)
     if peek(ps) == K"@"
-        mark = position(ps)
-        # export @a       ==>  (export (macro_name a))
-        # export @var"'"  ==>  (export (macro_name (var ')))
-        # export a, \n @b ==>  (export a (macro_name b))
+        # export @a       ==>  (export @a)
+        # export @var"'"  ==>  (export (var @'))
+        # export a, \n @b ==>  (export a @b)
         bump(ps, TRIVIA_FLAG)
         parse_macro_name(ps)
-        emit(ps, mark, K"macro_name")
+        fix_macro_name_kind!(ps, position(ps))
     else
         # export a  ==>  (export a)
         # export \n a  ==>  (export a)
@@ -2556,7 +2535,7 @@ function parse_import(ps::ParseState, word, has_import_prefix)
         # import A: x as y  ==>  (import (: (importpath A) (as (importpath x) y)))
         # using  A: x as y  ==>  (using (: (importpath A) (as (importpath x) y)))
         bump(ps, TRIVIA_FLAG)
-        parse_import_atsym(ps, false)
+        parse_atsym(ps, false)
         emit(ps, mark, K"as")
         if word == K"using" && !has_import_prefix
             # using A as B     ==>  (using (error (as (importpath A) B)))
@@ -2584,8 +2563,6 @@ function parse_import_path(ps::ParseState)
     # import ....A  ==> (import (importpath . . . . A))
     # Dots with spaces are allowed (a misfeature?)
     # import . .A    ==> (import (importpath . . A))
-    # Modules with operator symbol names
-    # import .⋆  ==>  (import (importpath . ⋆))
     first_dot = true
     while true
         t = peek_token(ps)
@@ -2605,31 +2582,44 @@ function parse_import_path(ps::ParseState)
         end
         first_dot = false
     end
-    # import @x     ==>  (import (importpath (macro_name x)))
-    # import $A     ==>  (import (importpath ($ A)))
-    parse_import_atsym(ps, false)
+    if is_dotted(peek_token(ps))
+        # Modules with operator symbol names
+        # import .⋆  ==>  (import (importpath . ⋆))
+        bump_trivia(ps)
+        bump_split(ps, (1,K".",EMPTY_FLAGS), (-1,peek(ps),EMPTY_FLAGS))
+    else
+        # import @x     ==>  (import (importpath @x))
+        # import $A     ==>  (import (importpath ($ A)))
+        parse_atsym(ps, false)
+    end
     while true
         t = peek_token(ps)
         k = kind(t)
         if k == K"."
             # import A.B    ==>  (import (importpath A B))
-            # import $A.@x  ==>  (import (importpath ($ A) (macro_name x)))
+            # import $A.@x  ==>  (import (importpath ($ A) @x))
             # import A.B.C  ==>  (import (importpath A B C))
-            # import A.⋆.f  ==>  (import (importpath A ⋆ f))
-            next_tok = peek_token(ps, 2)
-            if is_operator(kind(next_tok))
-                if preceding_whitespace(t)
-                    # Whitespace in import path allowed but discouraged
-                    # import A .==  ==>  (import (importpath A ==))
-                    emit_diagnostic(ps, whitespace=true,
-                                    warning="space between dots in import path")
-                end
-                bump_trivia(ps)
-            else
-                bump_disallowed_space(ps)
-            end
+            bump_disallowed_space(ps)
             bump(ps, TRIVIA_FLAG)
-            parse_import_atsym(ps)
+            parse_atsym(ps)
+        elseif is_dotted(t)
+            # Resolve tokenization ambiguity: In imports, dots are part of the
+            # path, not operators
+            # import A.==   ==>  (import (importpath A ==))
+            # import A.⋆.f  ==>  (import (importpath A ⋆ f))
+            if preceding_whitespace(t)
+                # Whitespace in import path allowed but discouraged
+                # import A .==  ==>  (import (importpath A ==))
+                emit_diagnostic(ps, whitespace=true,
+                                warning="space between dots in import path")
+            end
+            bump_trivia(ps)
+            m = position(ps)
+            bump_split(ps, (1,K".",TRIVIA_FLAG), (-1,k,EMPTY_FLAGS))
+            if is_syntactic_operator(k)
+                # import A.=  ==>  (import (importpath A (error =)))
+                emit(ps, m, K"error", error="syntactic operators not allowed in import")
+            end
         elseif k == K"..."
             # Import the .. operator
             # import A...  ==>  (import (importpath A ..))
@@ -2858,7 +2848,7 @@ function parse_array(ps::ParseState, mark, closer, end_is_symbol)
     if binding_power == typemin(Int)
         # [x@y  ==>  (hcat x (error-t ✘ y))
         bump_closing_token(ps, closer)
-        return (K"hcat", 0)
+        return (K"hcat", EMPTY_FLAGS)
     end
     while true
         (next_dim, next_bp) = parse_array_inner(ps, binding_power, array_order)
@@ -2874,9 +2864,9 @@ function parse_array(ps::ParseState, mark, closer, end_is_symbol)
         binding_power = next_bp
     end
     bump_closing_token(ps, closer)
-    return binding_power == -1 ? (K"vcat", 0) :
-           binding_power ==  0 ? (K"hcat", 0) :
-           (K"ncat", dim)
+    return binding_power == -1 ? (K"vcat", EMPTY_FLAGS) :
+           binding_power ==  0 ? (K"hcat", EMPTY_FLAGS) :
+           (K"ncat", set_numeric_flags(dim))
 end
 
 # Parse equal and ascending precedence chains of array concatenation operators -
@@ -3030,8 +3020,7 @@ function parse_cat(ps::ParseState, closer, end_is_symbol)
     mark = position(ps)
     if k == closer
         # []  ==>  (vect)
-        ckind, cflags = parse_vect(ps, closer, false)
-        return (ckind, cflags, 0)
+        return parse_vect(ps, closer, false)
     elseif k == K";"
         #v1.8: [;]           ==>  (ncat-1)
         #v1.8: [;;]          ==>  (ncat-2)
@@ -3041,7 +3030,7 @@ function parse_cat(ps::ParseState, closer, end_is_symbol)
         dim, _ = parse_array_separator(ps, Ref(:unknown))
         min_supported_version(v"1.8", ps, mark, "empty multidimensional array syntax")
         bump_closing_token(ps, closer)
-        return (K"ncat", EMPTY_FLAGS, dim)
+        return (K"ncat", set_numeric_flags(dim))
     end
     parse_eq_star(ps)
     k = peek(ps, skip_newlines=true)
@@ -3054,18 +3043,15 @@ function parse_cat(ps::ParseState, closer, end_is_symbol)
         # [x]      ==>  (vect x)
         # [x \n ]  ==>  (vect x)
         # [x       ==>  (vect x (error-t))
-        ckind, cflags = parse_vect(ps, closer, prefix_trailing_comma)
-        return (ckind, cflags, 0)
+        parse_vect(ps, closer, prefix_trailing_comma)
     elseif k == K"for"
         # [x for a in as]  ==>  (comprehension (generator x (iteration (in a as))))
         # [x \n\n for a in as]  ==>  (comprehension (generator x (iteration (in a as))))
-        ckind, cflags = parse_comprehension(ps, mark, closer)
-        return (ckind, cflags, 0)
+        parse_comprehension(ps, mark, closer)
     else
         # [x y]  ==>  (hcat x y)
         # and other forms; See parse_array.
-        ckind, dim = parse_array(ps, mark, closer, end_is_symbol)
-        return (ckind, EMPTY_FLAGS, dim)
+        parse_array(ps, mark, closer, end_is_symbol)
     end
 end
 
@@ -3089,8 +3075,7 @@ function parse_paren(ps::ParseState, check_identifiers=true, has_unary_prefix=fa
     @check peek(ps) == K"("
     bump(ps, TRIVIA_FLAG) # K"("
     after_paren_mark = position(ps)
-    (isdot, tok) = peek_dotted_op_token(ps)
-    k = kind(tok)
+    k = peek(ps)
     if k == K")"
         # ()  ==>  (tuple-p)
         bump(ps, TRIVIA_FLAG)
@@ -3470,13 +3455,13 @@ function parse_string(ps::ParseState, raw::Bool)
     emit(ps, mark, string_kind, str_flags)
 end
 
-function emit_braces(ps, mark, ckind, cflags, dim=0)
+function emit_braces(ps, mark, ckind, cflags)
     if ckind == K"hcat"
         # {x y}  ==>  (bracescat (row x y))
         emit(ps, mark, K"row", cflags & ~TRAILING_COMMA_FLAG)
     elseif ckind == K"ncat"
         # {x ;;; y}  ==>  (bracescat (nrow-3 x y))
-        emit(ps, mark, K"nrow", set_numeric_flags(dim))
+        emit(ps, mark, K"nrow", cflags & ~TRAILING_COMMA_FLAG)
     end
     check_ncat_compat(ps, mark, ckind)
     outk = ckind in KSet"vect comprehension" ? K"braces" : K"bracescat"
@@ -3493,17 +3478,9 @@ end
 function parse_atom(ps::ParseState, check_identifiers=true, has_unary_prefix=false)
     bump_trivia(ps)
     mark = position(ps)
-    (leading_dot, leading_tok) = peek_dotted_op_token(ps)
-    leading_kind = kind(leading_tok)
+    leading_kind = peek(ps)
     # todo: Reorder to put most likely tokens first?
-    if leading_dot
-        is_operator(leading_kind) && @goto is_operator
-        bump(ps, remap_kind=K"Identifier")
-        if check_identifiers
-            # .   ==> (error .)
-            emit(ps, mark, K"error", error="invalid identifier")
-        end
-    elseif is_error(leading_kind)
+    if is_error(leading_kind)
         # Errors for bad tokens are emitted in validate_tokens() rather than
         # here.
         bump(ps)
@@ -3576,7 +3553,7 @@ function parse_atom(ps::ParseState, check_identifiers=true, has_unary_prefix=fal
         # a[:(end)]  ==>  (ref a (quote-: (error-t end)))
         parse_atom(ParseState(ps, end_symbol=false), false)
         emit(ps, mark, K"quote", COLON_QUOTE)
-    elseif check_identifiers && leading_kind == K"=" && is_plain_equals(peek_token(ps)) && !leading_dot
+    elseif check_identifiers && leading_kind == K"=" && is_plain_equals(peek_token(ps))
         # =   ==> (error =)
         bump(ps, error="unexpected `=`")
     elseif leading_kind == K"Identifier"
@@ -3587,10 +3564,10 @@ function parse_atom(ps::ParseState, check_identifiers=true, has_unary_prefix=fal
         # where=1 ==> (= where 1)
         bump(ps, remap_kind=K"Identifier")
     elseif is_operator(leading_kind)
-@label is_operator
         # +     ==>  +
         # .+    ==>  (. +)
-        bump_dotted(ps, leading_dot, emit_dot_node=true, remap_kind=
+        # .=    ==>  (. =)
+        bump_dotsplit(ps, emit_dot_node=true, remap_kind=
                       is_syntactic_operator(leading_kind) ? leading_kind : K"Identifier")
         if check_identifiers && !is_valid_identifier(leading_kind)
             # +=   ==>  (error (op= +))
@@ -3660,16 +3637,16 @@ function parse_atom(ps::ParseState, check_identifiers=true, has_unary_prefix=fal
         parse_paren(ps, check_identifiers, has_unary_prefix)
     elseif leading_kind == K"[" # cat expression
         bump(ps, TRIVIA_FLAG)
-        ckind, cflags, dim = parse_cat(ps, K"]", ps.end_symbol)
-        emit(ps, mark, ckind, cflags | set_numeric_flags(dim))
+        ckind, cflags = parse_cat(ps, K"]", ps.end_symbol)
+        emit(ps, mark, ckind, cflags)
         check_ncat_compat(ps, mark, ckind)
     elseif leading_kind == K"{" # cat expression
         bump(ps, TRIVIA_FLAG)
-        ckind, cflags, dim = parse_cat(ps, K"}", ps.end_symbol)
-        emit_braces(ps, mark, ckind, cflags, dim)
+        ckind, cflags = parse_cat(ps, K"}", ps.end_symbol)
+        emit_braces(ps, mark, ckind, cflags)
     elseif leading_kind == K"@" # macro call
         # Macro names can be keywords
-        # @end x  ==> (macrocall (macro_name end) x)
+        # @end x  ==> (macrocall @end x)
         bump(ps, TRIVIA_FLAG)
         parse_macro_name(ps)
         parse_call_chain(ps, mark, true)

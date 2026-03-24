@@ -3,7 +3,7 @@
 
     @test span(t) == 6
     @test !is_leaf(t)
-    @test head(t) == SyntaxHead(K"call", 0x0088)
+    @test head(t) == SyntaxHead(K"call", 0x0008)
     @test span.(children(t)) == [2,1,1,1,1]
     @test head.(children(t)) == [
          SyntaxHead(K"Identifier", 0x0000)
@@ -33,9 +33,8 @@
          1:1      │  Identifier             ✔
          2:2      │  (
          3:7      │  [macrocall]
-         3:4      │    [macro_name]
-         3:3      │      @
-         4:4      │      Identifier         ✔
+         3:3      │    @
+         4:4      │    MacroName            ✔
          5:5      │    (
          6:6      │    Identifier           ✔
          7:7      │    )
@@ -51,9 +50,8 @@
          1:1      │  Identifier             ✔   "f"
          2:2      │  (                          "("
          3:7      │  [macrocall]
-         3:4      │    [macro_name]
-         3:3      │      @                      "@"
-         4:4      │      Identifier         ✔   "x"
+         3:3      │    @                        "@"
+         4:4      │    MacroName            ✔   "x"
          5:5      │    (                        "("
          6:6      │    Identifier           ✔   "y"
          7:7      │    )                        ")"
@@ -62,7 +60,4 @@
         10:10     │  Identifier             ✔   "z"
         11:11     │  )                          ")"
     """
-
-    @test sprint(show, parsestmt(GreenNode, "a + bb - f(ccc)")) ==
-        "(call-i (call-i 1-1::Identifier 2-2::Whitespace-t 3-3::Identifier 4-4::Whitespace-t 5-6::Identifier) 7-7::Whitespace-t 8-8::Identifier 9-9::Whitespace-t (call 10-10::Identifier 11-11::(-t 12-14::Identifier 15-15::)-t))"
 end

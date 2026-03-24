@@ -18,7 +18,6 @@ using .JuliaSyntax:
     @K_str,
     # Nodes
     GreenNode,
-    RedTreeCursor,
     SyntaxNode,
     ErrorVal,
     # Node inspection
@@ -132,7 +131,7 @@ function exprs_roughly_equal(fl_ex, ex)
     args = ex.head in (:block, :quote, :toplevel) ?
            filter(x->!(x isa LineNumberNode), ex.args) :
            ex.args
-    if (fl_ex.head == :block && ex.head == :tuple &&
+    if (fl_ex.head == :block && ex.head == :tuple && 
         length(fl_args) == 2 && length(args) == 2 &&
         Meta.isexpr(args[1], :parameters, 1) &&
         exprs_roughly_equal(fl_args[2], args[1].args[1]) &&
@@ -482,3 +481,4 @@ function Meta_parseall(text::AbstractString; filename="none", lineno=1)
     ex,_ = _Meta_parse_string(text, String(filename), lineno, 1, :all)
     return ex
 end
+

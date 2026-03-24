@@ -416,7 +416,7 @@ function parse_julia_literal(txtbuf::Vector{UInt8}, head::SyntaxHead, srcrange)
         parse_int_literal(val_str)
     elseif k in KSet"BinInt OctInt HexInt"
         parse_uint_literal(val_str, k)
-    elseif is_identifier(k)
+    elseif k == K"Identifier" || k == K"Placeholder"
         if has_flags(head, RAW_STRING_FLAG)
             io = IOBuffer()
             unescape_raw_string(io, txtbuf, first(srcrange), last(srcrange)+1, false)
@@ -430,6 +430,12 @@ function parse_julia_literal(txtbuf::Vector{UInt8}, head::SyntaxHead, srcrange)
             Symbol(normalize_identifier(val_str))
     elseif k == K"error"
         ErrorVal()
+    elseif k == K"MacroName"
+        Symbol("@$(normalize_identifier(val_str))")
+    elseif k == K"StringMacroName"
+        Symbol("@$(normalize_identifier(val_str))_str")
+    elseif k == K"CmdMacroName"
+        Symbol("@$(normalize_identifier(val_str))_cmd")
     elseif is_syntax_kind(head)
         nothing
     elseif is_keyword(k)
@@ -442,32 +448,3 @@ function parse_julia_literal(txtbuf::Vector{UInt8}, head::SyntaxHead, srcrange)
     end
 end
 
-"""
-    lower_identifier_name(name, kind)
-
-Lower a Julia identifier `name` of given `kind` to the name used by the Julia
-runtime. (In particular, this handles the name mangling of macros.)
-
-This is a lowering (rather than parsing) step, but is needed for `Expr`
-conversion and is also used for pretty printing.
-"""
-function lower_identifier_name(name::AbstractString, k::Kind)
-    # Replicate eager lowering done by the flisp parser
-    if k == K"macro_name"
-        name == "." ? "@__dot__" : "@$name"
-    elseif k == K"StrMacroName"
-        "@$(name)_str"
-    elseif k == K"CmdMacroName"
-        "@$(name)_cmd"
-    else
-        name
-    end
-end
-
-function lower_identifier_name(name::Symbol, k::Kind)
-    if k == K"Identifier"
-        name # avoid unnecessary conversion
-    else
-        Symbol(lower_identifier_name(string(name), k))
-    end
-end

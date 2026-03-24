@@ -1,10 +1,24 @@
 """
-    struct GreenNode
+    GreenNode(head, span)
+    GreenNode(head, children...)
 
-An explicit pointer-y representation of the green tree produced by the parser.
-See [`RawGreenNode`](@ref) for documentation on working with the implicit green
-tree directly. However, this representation is useful for introspection as it
-provides O(1) access to the children (as well as forward iteration).
+A "green tree" is a lossless syntax tree which overlays all the source text.
+The most basic properties of a green tree are that:
+
+* Nodes cover a contiguous span of bytes in the text
+* Sibling nodes are ordered in the same order as the text
+
+As implementation choices, we choose that:
+
+* Nodes are immutable and don't know their parents or absolute position, so can
+  be cached and reused
+* Nodes are homogeneously typed at the language level so they can be stored
+  concretely, with the `head` defining the node type. Normally this would
+  include a "syntax kind" enumeration, but it can also include flags and record
+  information the parser knew about the layout of the child nodes.
+* For simplicity and uniformity, leaf nodes cover a single token in the source.
+  This is like rust-analyzer, but different from Roslyn where leaves can
+  include syntax trivia.
 """
 struct GreenNode{Head}
     head::Head
@@ -32,7 +46,7 @@ span(node::GreenNode) = node.span
 Base.getindex(node::GreenNode, i::Int) = children(node)[i]
 Base.getindex(node::GreenNode, rng::UnitRange) = view(children(node), rng)
 Base.firstindex(node::GreenNode) = 1
-Base.lastindex(node::GreenNode) = children(node) === nothing ? 0 : length(children(node))
+Base.lastindex(node::GreenNode) = length(children(node))
 
 """
 Get absolute position and span of the child of `node` at the given tree `path`.
@@ -58,17 +72,7 @@ end
 
 Base.summary(node::GreenNode) = summary(node.head)
 
-function Base.hash(node::GreenNode, h::UInt)
-    children = node.children
-    if children === nothing
-        h = hash(nothing, h)
-    else # optimization - avoid extra allocations from `hash(::AbstractVector, ::UInt)`
-        for child in children
-            h = hash(child, h)
-        end
-    end
-    hash(node.head, hash(node.span, h))
-end
+Base.hash(node::GreenNode, h::UInt) = hash((node.head, node.span, node.children), h)
 function Base.:(==)(n1::GreenNode, n2::GreenNode)
     n1.head == n2.head && n1.span == n2.span && n1.children == n2.children
 end
@@ -118,59 +122,11 @@ function Base.show(io::IO, ::MIME"text/plain", node::GreenNode, str::AbstractStr
     _show_green_node(io, node, "", 1, str, show_trivia)
 end
 
-function _show_green_node_sexpr(io, node::GreenNode, position)
-    if is_leaf(node)
-        print(io, position, "-", position+node.span-1, "::", untokenize(head(node); unique=false))
-    else
-        print(io, "(", untokenize(head(node); unique=false))
-        p = position
-        for n in children(node)
-            print(io, ' ')
-            _show_green_node_sexpr(io, n, p)
-            p += n.span
-        end
-        print(io, ')')
+function build_tree(::Type{GreenNode}, stream::ParseStream; kws...)
+    build_tree(GreenNode{SyntaxHead}, stream; kws...) do h, srcrange, cs
+        span = length(srcrange)
+        isnothing(cs) ? GreenNode(h, span) :
+                        GreenNode(h, span, collect(GreenNode{SyntaxHead}, cs))
     end
 end
 
-function Base.show(io::IO, node::GreenNode)
-    _show_green_node_sexpr(io, node, 1)
-end
-
-function GreenNode(cursor::GreenTreeCursor)
-    chead = head(cursor)
-    T = typeof(chead)
-    if is_leaf(cursor)
-        return GreenNode{T}(head(cursor), span(cursor), nothing)
-    else
-        children = GreenNode{T}[]
-        for child in reverse(cursor)
-            pushfirst!(children, GreenNode(child))
-        end
-        return GreenNode{T}(head(cursor), span(cursor), children)
-    end
-end
-
-function build_tree(::Type{GreenNode}, stream::ParseStream;
-                    # unused, but required since `_parse` is written generic
-                    filename=nothing, first_line=1, keep_parens=false)
-    cursor = GreenTreeCursor(stream)
-    if has_toplevel_siblings(cursor)
-        # There are multiple toplevel nodes, e.g. because we're using this
-        # to test a partial parse. Wrap everything in K"wrapper"
-        all_processed = 0
-        local cs
-        for child in reverse_toplevel_siblings(cursor)
-            c = GreenNode(child)
-            if !@isdefined(cs)
-                cs = GreenNode{SyntaxHead}[c]
-            else
-                pushfirst!(cs, c)
-            end
-        end
-        @assert length(cs) != 1
-        return GreenNode(SyntaxHead(K"wrapper", NON_TERMINAL_FLAG), stream.next_byte-1, cs)
-    else
-        return GreenNode(cursor)
-    end
-end

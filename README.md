@@ -1,12 +1,7 @@
-> [!IMPORTANT]
-> Starting with version 2.0, active development has moved to [`JuliaSyntax/` in the `JuliaLang/julia` repository](https://github.com/JuliaLang/julia/tree/master/JuliaSyntax) (for Julia 1.14+).
-> 
-> New issues and PRs should not be created here, except for backports to Julia version ≤ 1.13 or JuliaSyntax ≤ 1.0:
-> - Julia 1.13: [release-1.13](https://github.com/JuliaLang/JuliaSyntax.jl/tree/release-1.13)
-> - Julia 1.12: [release-1.12](https://github.com/JuliaLang/JuliaSyntax.jl/tree/release-1.12)
-> - JuliaSyntax 1.0 (as a package): [backports-release-1](https://github.com/JuliaLang/JuliaSyntax.jl/tree/backports-release-1)
-
 # JuliaSyntax
+
+[![Build Status](https://github.com/c42f/JuliaSyntax.jl/workflows/CI/badge.svg)](https://github.com/c42f/JuliaSyntax.jl/actions)
+[![codecov.io](https://codecov.io/github/JuliaLang/JuliaSyntax.jl/coverage.svg?branch=main)](https://codecov.io/github/JuliaLang/JuliaSyntax.jl?branch=main)
 
 A Julia compiler frontend, written in Julia.
 

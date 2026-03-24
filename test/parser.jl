@@ -5,21 +5,23 @@ function parse_to_sexpr_str(production, code::AbstractString; v=v"1.6", show_kws
     stream = ParseStream(code, version=v)
     production(ParseState(stream))
     JuliaSyntax.validate_tokens(stream)
-    s = build_tree(SyntaxNode, stream, keep_parens=true)
+    t = build_tree(GreenNode, stream)
+    source = SourceFile(code)
+    s = SyntaxNode(source, t, keep_parens=true)
     return sprint(io->show(io, MIME("text/x.sexpression"), s; show_kws...))
 end
 
-function test_parse(production, input, expected)
+function test_parse(production, input, output)
     if !(input isa AbstractString)
         opts, input = input
     else
         opts = NamedTuple()
     end
     parsed = parse_to_sexpr_str(production, input; opts...)
-    if expected isa Regex # Could be AbstractPattern, but that type was added in Julia 1.6.
-        @test match(expected, parsed) !== nothing
+    if output isa Regex # Could be AbstractPattern, but that type was added in Julia 1.6.
+        @test match(output, parsed) !== nothing
     else
-        @test parsed == expected
+        @test parsed == output
     end
 end
 
@@ -119,7 +121,6 @@ tests = [
         "x < y"       => "(call-i x < y)"
         "x .< y"      => "(dotcall-i x < y)"
         "x .<: y"     => "(dotcall-i x <: y)"
-        ":. == :."    => "(call-i (quote-: .) == (quote-: .))"
         # Comparison chains
         "x < y < z"   => "(comparison x < y < z)"
         "x == y < z"  => "(comparison x == y < z)"
@@ -236,7 +237,6 @@ tests = [
         "+(a,)"    =>  "(call-, + a)"
         ".+(a,)"   =>  "(call-, (. +) a)"
         "(.+)(a)"  =>  "(call (parens (. +)) a)"
-        "(.~(a))"  =>  "(parens (dotcall-pre ~ (parens a)))"
         "+(a=1,)"  =>  "(call-, + (= a 1))"
         "+(a...)"  =>  "(call + (... a))"
         "+(a;b,c)" =>  "(call + a (parameters b c))"
@@ -300,7 +300,7 @@ tests = [
         # `where` combined with `->` still parses strangely. However:
         # * It's extra hard to add a tuple around the `x` in this syntax corner case.
         # * The user already needs to add additional, ugly, parens to get this
-        #   to parse correctly because the precedence of `where` is
+        #   to parse correctly because the precendence of `where` is
         #   inconsistent with `::` and `->` in this case.
         "(x where T)->c" => "(-> (parens (where x T)) c)"
         "((x::T) where T)->c" => "(-> (parens (where (parens (::-i x T)) T)) c)"
@@ -345,37 +345,37 @@ tests = [
         ".&(x,y)" =>  "(call (. &) x y)"
         # parse_call_chain
         "f(a).g(b)" => "(call (. (call f a) g) b)"
-        "\$A.@x"    =>  "(macrocall (. (\$ A) (macro_name x)))"
+        "\$A.@x"    =>  "(macrocall (. (\$ A) @x))"
 
         # non-errors in space sensitive contexts
         "[f (x)]"    =>  "(hcat f (parens x))"
         "[f x]"      =>  "(hcat f x)"
         # space separated macro calls
-        "@foo a b"     =>  "(macrocall (macro_name foo) a b)"
-        "@foo (x)"     =>  "(macrocall (macro_name foo) (parens x))"
-        "@foo (x,y)"   =>  "(macrocall (macro_name foo) (tuple-p x y))"
-        "A.@foo a b"   =>  "(macrocall (. A (macro_name foo)) a b)"
-        "@A.foo a b"   =>  "(macrocall (macro_name (. A foo)) a b)"
-        "[@foo x]"     =>  "(vect (macrocall (macro_name foo) x))"
-        "[@foo]"       =>  "(vect (macrocall (macro_name foo)))"
-        "@var\"#\" a"  =>  "(macrocall (macro_name (var #)) a)"
-        "@(A) x"       =>  "(macrocall (macro_name (parens A)) x)"
-        "A.@x y"       =>  "(macrocall (. A (macro_name x)) y)"
-        "A.@var\"#\" a"=>  "(macrocall (. A (macro_name (var #))) a)"
-        "@+x y"        =>  "(macrocall (macro_name +) x y)"
-        "A.@.x"        =>  "(macrocall (. A (macro_name .)) x)"
+        "@foo a b"     =>  "(macrocall @foo a b)"
+        "@foo (x)"     =>  "(macrocall @foo (parens x))"
+        "@foo (x,y)"   =>  "(macrocall @foo (tuple-p x y))"
+        "A.@foo a b"   =>  "(macrocall (. A @foo) a b)"
+        "@A.foo a b"   =>  "(macrocall (. A @foo) a b)"
+        "[@foo x]"     =>  "(vect (macrocall @foo x))"
+        "[@foo]"       =>  "(vect (macrocall @foo))"
+        "@var\"#\" a"  =>  "(macrocall (var @#) a)"
+        "@(A) x"       =>  "(macrocall (parens @A) x)"
+        "A.@x y"       =>  "(macrocall (. A @x) y)"
+        "A.@var\"#\" a"=>  "(macrocall (. A (var @#)) a)"
+        "@+x y"        =>  "(macrocall @+ x y)"
+        "A.@.x"        =>  "(macrocall (. A @.) x)"
         # Macro names
-        "@! x"  => "(macrocall (macro_name !) x)"
-        "@.. x" => "(macrocall (macro_name ..) x)"
-        "@\$ y"  => "(macrocall (macro_name \$) y)"
-        "@[x] y z" => "(macrocall (macro_name (error (vect x))) y z)"
+        "@! x"  => "(macrocall @! x)"
+        "@.. x" => "(macrocall @.. x)"
+        "@\$ y"  => "(macrocall @\$ y)"
+        "@[x] y z" => "(macrocall (error (vect x)) y z)"
         # Special @doc parsing rules
-        "@doc x\ny"    =>  "(macrocall (macro_name doc) x y)"
-        "A.@doc x\ny"  =>  "(macrocall (. A (macro_name doc)) x y)"
-        "@A.doc x\ny"  =>  "(macrocall (macro_name (. A doc)) x y)"
-        "@doc x y\nz"  =>  "(macrocall (macro_name doc) x y)"
-        "@doc x\n\ny"  =>  "(macrocall (macro_name doc) x)"
-        "@doc x\nend"  =>  "(macrocall (macro_name doc) x)"
+        "@doc x\ny"    =>  "(macrocall @doc x y)"
+        "A.@doc x\ny"  =>  "(macrocall (. A @doc) x y)"
+        "@A.doc x\ny"  =>  "(macrocall (. A @doc) x y)"
+        "@doc x y\nz"  =>  "(macrocall @doc x y)"
+        "@doc x\n\ny"  =>  "(macrocall @doc x)"
+        "@doc x\nend"  =>  "(macrocall @doc x)"
 
         # calls with brackets
         "f(a,b)"  => "(call f a b)"
@@ -384,26 +384,26 @@ tests = [
         "f(a; b; c)" => "(call f a (parameters b) (parameters c))"
         "(a=1)()" =>  "(call (parens (= a 1)))"
         "f (a)" => "(call f (error-t) a)"
-        "@x(a, b)"   =>  "(macrocall-p (macro_name x) a b)"
-        "@x(a, b,)"  =>  "(macrocall-p-, (macro_name x) a b)"
-        "A.@x(y)"    =>  "(macrocall-p (. A (macro_name x)) y)"
-        "A.@x(y).z"  =>  "(. (macrocall-p (. A (macro_name x)) y) z)"
+        "@x(a, b)"   =>  "(macrocall-p @x a b)"
+        "@x(a, b,)"  =>  "(macrocall-p-, @x a b)"
+        "A.@x(y)"    =>  "(macrocall-p (. A @x) y)"
+        "A.@x(y).z"  =>  "(. (macrocall-p (. A @x) y) z)"
         "f(y for x = xs; a)" => "(call f (generator y (iteration (in x xs))) (parameters a))"
         # do
         "f() do\nend"         =>  "(call f (do (tuple) (block)))"
         "f() do ; body end"   =>  "(call f (do (tuple) (block body)))"
         "f() do x, y\n body end"  =>  "(call f (do (tuple x y) (block body)))"
         "f(x) do y body end"  =>  "(call f x (do (tuple y) (block body)))"
-        "@f(x) do y body end" =>  "(macrocall-p (macro_name f) x (do (tuple y) (block body)))"
+        "@f(x) do y body end" =>  "(macrocall-p @f x (do (tuple y) (block body)))"
 
         # square brackets
-        "@S[a,b]"  => "(macrocall (macro_name S) (vect a b))"
-        "@S[a b]"  => "(macrocall (macro_name S) (hcat a b))"
-        "@S[a; b]" => "(macrocall (macro_name S) (vcat a b))"
-        "A.@S[a]"  =>  "(macrocall (. A (macro_name S)) (vect a))"
-        "@S[a].b"  =>  "(. (macrocall (macro_name S) (vect a)) b)"
-        ((v=v"1.7",), "@S[a ;; b]")  =>  "(macrocall (macro_name S) (ncat-2 a b))"
-        ((v=v"1.6",), "@S[a ;; b]")  =>  "(macrocall (macro_name S) (error (ncat-2 a b)))"
+        "@S[a,b]"  => "(macrocall @S (vect a b))"
+        "@S[a b]"  => "(macrocall @S (hcat a b))"
+        "@S[a; b]" => "(macrocall @S (vcat a b))"
+        "A.@S[a]"  =>  "(macrocall (. A @S) (vect a))"
+        "@S[a].b"  =>  "(. (macrocall @S (vect a)) b)"
+        ((v=v"1.7",), "@S[a ;; b]")  =>  "(macrocall @S (ncat-2 a b))"
+        ((v=v"1.6",), "@S[a ;; b]")  =>  "(macrocall @S (error (ncat-2 a b)))"
         "a[i]"  =>  "(ref a i)"
         "a [i]"  =>  "(ref a (error-t) i)"
         "a[i,j]"  =>  "(ref a i j)"
@@ -419,10 +419,10 @@ tests = [
 
         # Dotted forms
         # Allow `@` in macrocall only in first and last position
-        "A.B.@x"    =>  "(macrocall (. (. A B) (macro_name x)))"
-        "@A.B.x"    =>  "(macrocall (macro_name (. (. A B) x)))"
-        "A.@B.x"    =>  "(macrocall (. (. A (error-t) B) (macro_name (error-t) x)))"
-        "@M.(x)"    =>  "(macrocall (dotcall (macro_name M) (error-t) x))"
+        "A.B.@x"    =>  "(macrocall (. (. A B) @x))"
+        "@A.B.x"    =>  "(macrocall (. (. A B) @x))"
+        "A.@B.x"    =>  "(macrocall (. (. A B) (error-t) @x))"
+        "@M.(x)"    =>  "(macrocall (dotcall @M (error-t) x))"
         "f.(a,b)"   =>  "(dotcall f a b)"
         "f.(a,b,)"  =>  "(dotcall-, f a b)"
         "f.(a=1; b=2)" => "(dotcall f (= a 1) (parameters (= b 2)))"
@@ -434,32 +434,25 @@ tests = [
         "A.: +"     =>  "(. A (quote-: (error-t) +))"
         "f.\$x"     =>  "(. f (\$ x))"
         "f.\$(x+y)" =>  "(. f (\$ (parens (call-i x + y))))"
-        "A.\$B.@x"  =>  "(macrocall (. (. A (\$ B)) (macro_name x)))"
-        "@A.\$x a"  =>  "(macrocall (macro_name (. A (error x))) a)"
-        "A.@x"      =>  "(macrocall (. A (macro_name x)))"
-        "A.@x a"    =>  "(macrocall (. A (macro_name x)) a)"
-        "@A.B.@x a" =>  "(macrocall (macro_name (. (. A B) (error-t) x)) a)"
+        "A.\$B.@x"  =>  "(macrocall (. (. A (\$ B)) @x))"
+        "@A.\$x a"  =>  "(macrocall (. A (error x)) a)"
+        "A.@x"      =>  "(macrocall (. A @x))"
+        "A.@x a"    =>  "(macrocall (. A @x) a)"
+        "@A.B.@x a" =>  "(macrocall (. (. A B) (error-t) @x) a)"
         # .' discontinued
         "f.'"    =>  "(dotcall-post f (error '))"
         # Field/property syntax
         "f.x.y"  =>  "(. (. f x) y)"
         "x .y"   =>  "(. x (error-t) y)"
-        "x.?"    =>  "(. x ?)"
-        "x.in"   =>  "(. x in)"
         # Adjoint
         "f'"  => "(call-post f ')"
         "f'ᵀ" => "(call-post f 'ᵀ)"
         # Curly calls
         "S {a}"   => "(curly S (error-t) a)"
-        "A.@S{a}" => "(macrocall (. A (macro_name S)) (braces a))"
-        "@S{a,b}" => "(macrocall (macro_name S) (braces a b))"
-        "A.@S{a}" => "(macrocall (. A (macro_name S)) (braces a))"
-        "@S{a}.b" => "(. (macrocall (macro_name S) (braces a)) b)"
-        # Macro calls with chained operations
-        "@a[b][c]" => "(ref (macrocall (macro_name a) (vect b)) c)"
-        "@a{b}{c}" => "(curly (macrocall (macro_name a) (braces b)) c)"
-        "@a[b]{c}" => "(curly (macrocall (macro_name a) (vect b)) c)"
-        "@a{b}[c]" => "(ref (macrocall (macro_name a) (braces b)) c)"
+        "A.@S{a}" => "(macrocall (. A @S) (braces a))"
+        "@S{a,b}" => "(macrocall @S (braces a b))"
+        "A.@S{a}" => "(macrocall (. A @S) (braces a))"
+        "@S{a}.b" => "(. (macrocall @S (braces a)) b)"
         "S{a,b}"  => "(curly S a b)"
         "T{y for x = xs; a}" => "(curly T (generator y (iteration (in x xs))) (parameters a))"
         # String macros
@@ -469,8 +462,6 @@ tests = [
         "x``"        => """(macrocall @x_cmd (cmdstring-r ""))"""
         "in\"str\""  => """(macrocall @in_str (string-r "str"))"""
         "outer\"str\"" => """(macrocall @outer_str (string-r "str"))"""
-        "A.x\"str\"" => """(macrocall (. A @x_str) (string-r "str"))"""
-        "A.x`str`" => """(macrocall (. A @x_cmd) (cmdstring-r "str"))"""
         # Triple quoted processing for custom strings
         "r\"\"\"\nx\"\"\""        => raw"""(macrocall @r_str (string-s-r "x"))"""
         "r\"\"\"\n x\n y\"\"\""   => raw"""(macrocall @r_str (string-s-r "x\n" "y"))"""
@@ -552,9 +543,9 @@ tests = [
         """module A \n "x"\na\n end""" => """(module A (block (doc (string "x") a)))"""
         # export
         "export a"   =>  "(export a)"
-        "export @a"  =>  "(export (macro_name a))"
-        "export @var\"'\"" =>  "(export (macro_name (var ')))"
-        "export a, \n @b"  =>  "(export a (macro_name b))"
+        "export @a"  =>  "(export @a)"
+        "export @var\"'\"" =>  "(export (var @'))"
+        "export a, \n @b"  =>  "(export a @b)"
         "export +, =="     =>  "(export + ==)"
         "export \n a"      =>  "(export a)"
         "export \$a, \$(a*b)"  =>  "(export (\$ a) (\$ (parens (call-i a * b))))"
@@ -608,9 +599,9 @@ tests = [
         "function (x=1) end"   =>  "(function (tuple-p (= x 1)) (block))"
         "function (;x=1) end"  =>  "(function (tuple-p (parameters (= x 1))) (block))"
         "function (f(x),) end" =>  "(function (tuple-p-, (call f x)) (block))"
-        "function (@f(x);) end" => "(function (tuple-p (macrocall-p (macro_name f) x) (parameters)) (block))"
-        "function (@f(x)...) end" =>  "(function (tuple-p (... (macrocall-p (macro_name f) x))) (block))"
-        "function (@f(x)) end" =>  "(function (error (tuple-p (macrocall-p (macro_name f) x))) (block))"
+        "function (@f(x);) end" => "(function (tuple-p (macrocall-p @f x) (parameters)) (block))"
+        "function (@f(x)...) end" =>  "(function (tuple-p (... (macrocall-p @f x))) (block))"
+        "function (@f(x)) end" =>  "(function (error (tuple-p (macrocall-p @f x))) (block))"
         "function (\$f) end"   =>  "(function (error (tuple-p (\$ f))) (block))"
         "function ()(x) end"   =>  "(function (call (tuple-p) x) (block))"
         "function (A).f() end" =>  "(function (call (. (parens A) f)) (block))"
@@ -619,13 +610,6 @@ tests = [
         "function (::g(x))() end" => "(function (call (parens (::-pre (call g x)))) (block))"
         "function (f::T{g(i)})() end" => "(function (call (parens (::-i f (curly T (call g i))))) (block))"
         "function (::T)() end" =>  "(function (call (parens (::-pre T))) (block))"
-        "function (\n        ::T\n        )() end" =>  "(function (call (parens (::-pre T))) (block))"
-        "function (\n        x::T\n        )() end" =>  "(function (call (parens (::-i x T))) (block))"
-        "function (\n        f\n        )() end" =>  "(function (call (parens f)) (block))"
-        "function (\n        A\n        ).f() end" =>  "(function (call (. (parens A) f)) (block))"
-        "function (\n        ::T\n        )(x, y) end" =>  "(function (call (parens (::-pre T)) x y) (block))"
-        "function (\n        f::T{g(i)}\n        )() end" => "(function (call (parens (::-i f (curly T (call g i))))) (block))"
-        "function (\n        x, y\n        ) x + y end" => "(function (tuple-p x y) (block (call-i x + y)))"
         "function (:*=(f))() end" => "(function (call (parens (call (quote-: *=) f))) (block))"
         "function begin() end" =>  "(function (call (error begin)) (block))"
         "function f() end"     =>  "(function (call f) (block))"
@@ -661,10 +645,10 @@ tests = [
         "function f() \n a \n b end"  =>  "(function (call f) (block a b))"
         "function f() end"       =>  "(function (call f) (block))"
         # Macrocall as sig
-        ((v=v"1.12",), "function @callmemacro(a::Int) \n 1 \n end") => "(function (macrocall-p (macro_name callmemacro) (::-i a Int)) (block 1))"
-        ((v=v"1.12",), "function @callmemacro(a::T, b::T) where T <: Int64\n3\nend") => "(function (where (macrocall-p (macro_name callmemacro) (::-i a T) (::-i b T)) (<: T Int64)) (block 3))"
-        ((v=v"1.12",), "function @callmemacro(a::Int, b::Int, c::Int)::Float64\n4\nend") => "(function (::-i (macrocall-p (macro_name callmemacro) (::-i a Int) (::-i b Int) (::-i c Int)) Float64) (block 4))"
-        ((v=v"1.12",), "function @f()() end") => "(function (call (macrocall-p (macro_name f))) (block))"
+        ((v=v"1.12",), "function @callmemacro(a::Int) \n 1 \n end") => "(function (macrocall-p @callmemacro (::-i a Int)) (block 1))"
+        ((v=v"1.12",), "function @callmemacro(a::T, b::T) where T <: Int64\n3\nend") => "(function (where (macrocall-p @callmemacro (::-i a T) (::-i b T)) (<: T Int64)) (block 3))"
+        ((v=v"1.12",), "function @callmemacro(a::Int, b::Int, c::Int)::Float64\n4\nend") => "(function (::-i (macrocall-p @callmemacro (::-i a Int) (::-i b Int) (::-i c Int)) Float64) (block 4))"
+        ((v=v"1.12",), "function @f()() end") => "(function (call (macrocall-p @f)) (block))"
         # Errors
         "function"            => "(function (error (error)) (block (error)) (error-t))"
     ],
@@ -718,9 +702,9 @@ tests = [
         # Modules with operator symbol names
         "import .⋆"     =>  "(import (importpath . ⋆))"
         # Expressions allowed in import paths
-        "import @x"     =>  "(import (importpath (macro_name x)))"
+        "import @x"     =>  "(import (importpath @x))"
         "import \$A"    =>  "(import (importpath (\$ A)))"
-        "import \$A.@x" =>  "(import (importpath (\$ A) (macro_name x)))"
+        "import \$A.@x" =>  "(import (importpath (\$ A) @x))"
         "import A.B"    =>  "(import (importpath A B))"
         "import A.B.C"  =>  "(import (importpath A B C))"
         "import A.:+"   =>  "(import (importpath A (quote-: +)))"
@@ -904,12 +888,10 @@ tests = [
         "{x,y,}"     =>  "(braces-, x y)"
         "{x y}"      =>  "(bracescat (row x y))"
         ((v=v"1.7",), "{x ;;; y}") =>  "(bracescat (nrow-3 x y))"
-        ((v=v"1.7",), "{a ;; b}") =>  "(bracescat (nrow-2 a b))"
-        ((v=v"1.7",), "{a ;;;; b}") =>  "(bracescat (nrow-4 a b))"
         # Macro names can be keywords
-        "@end x" => "(macrocall (macro_name end) x)"
+        "@end x" => "(macrocall @end x)"
         # __dot__ macro
-        "@. x" => "(macrocall (macro_name .) x)"
+        "@. x" => "(macrocall @. x)"
         # cmd strings
         "``"         =>  "(cmdstring-r \"\")"
         "`cmd`"      =>  "(cmdstring-r \"cmd\")"
@@ -945,11 +927,6 @@ tests = [
         # Column major
         ((v=v"1.7",), "[x ; y ;; z ; w ;;; a ; b ;; c ; d]")  =>
             "(ncat-3 (nrow-2 (nrow-1 x y) (nrow-1 z w)) (nrow-2 (nrow-1 a b) (nrow-1 c d)))"
-        # Dimension 4 ncat
-        ((v=v"1.7",), "[x ;;;; y]")  =>  "(ncat-4 x y)"
-        ((v=v"1.7",), "[a ; b ;;;; c ; d]")  =>  "(ncat-4 (nrow-1 a b) (nrow-1 c d))"
-        ((v=v"1.7",), "[a b ; c d ;;;; e f ; g h]")  =>
-            "(ncat-4 (nrow-1 (row a b) (row c d)) (nrow-1 (row e f) (row g h)))"
         # Array separators
         # Newlines before semicolons are not significant
         "[a \n ;]"  =>  "(vcat a)"
@@ -970,7 +947,7 @@ tests = [
         "[a \n b]"  =>  "(vcat a b)"
         # Can't mix multiple ;'s and spaces
         ((v=v"1.7",), "[a ;; b c]")  =>  "(ncat-2 a (row b (error-t) c))"
-        # Empty N-dimensional arrays
+        # Empty nd arrays
         ((v=v"1.8",), "[;]")   =>  "(ncat-1)"
         ((v=v"1.8",), "[;;]")  =>  "(ncat-2)"
         ((v=v"1.8",), "[\n  ;; \n ]")  =>  "(ncat-2)"
@@ -1061,8 +1038,8 @@ tests = [
         "public export=true foo, bar"                   => PARSE_ERROR # but these may be
         "public experimental=true foo, bar"             => PARSE_ERROR # supported soon ;)
         "public(x::String) = false"                     => "(function-= (call public (::-i x String)) false)"
-        "module M; export @a; end"                      => "(module M (block (export (macro_name a))))"
-        "module M; public @a; end"                      => "(module M (block (public (macro_name a))))"
+        "module M; export @a; end"                      => "(module M (block (export @a)))"
+        "module M; public @a; end"                      => "(module M (block (public @a)))"
         "module M; export ⤈; end"                       => "(module M (block (export ⤈)))"
         "module M; public ⤈; end"                       => "(module M (block (public ⤈)))"
         "public = 4"                                    => "(= public 4)"
@@ -1070,7 +1047,7 @@ tests = [
         "public() = 6"                                  => "(function-= (call public) 6)"
     ]),
     JuliaSyntax.parse_stmts => [
-        ((v = v"1.12",), "@callmemacro(b::Float64) = 2") => "(= (macrocall-p (macro_name callmemacro) (::-i b Float64)) 2)"
+        ((v = v"1.12",), "@callmemacro(b::Float64) = 2") => "(= (macrocall-p @callmemacro (::-i b Float64)) 2)"
     ],
     JuliaSyntax.parse_docstring => [
         """ "notdoc" ]        """ => "(string \"notdoc\")"
@@ -1112,10 +1089,10 @@ parsestmt_test_specs = [
 
     # The following may not be ideal error recovery! But at least the parser
     # shouldn't crash
-    "@(x y)" => "(macrocall (macro_name (parens x (error-t y))))"
+    "@(x y)" => "(macrocall (parens @x (error-t y)))"
     "|(&\nfunction" => "(call | (& (function (error (error)) (block (error)) (error-t))) (error-t))"
-    "@(" => "(macrocall (macro_name (parens (error-t))))"
-    "x = @(" => "(= x (macrocall (macro_name (parens (error-t)))))"
+    "@(" => "(macrocall (parens (error-t)))"
+    "x = @(" => "(= x (macrocall (parens (error-t))))"
     "function(where" => "(function (tuple-p where (error-t)) (block (error)) (error-t))"
     # Contextual keyword pairs must not be separated by newlines even within parens
     "(abstract\ntype X end)" => "(wrapper (parens abstract (error-t type X)) (error-t end ✘))"
@@ -1176,9 +1153,6 @@ parsestmt_with_kind_tests = [
     "a >>= b" => "(op= a::Identifier >>::Identifier b::Identifier)"
     ":+="    => "(quote-: +=::op=)"
     ":.+="   => "(quote-: (. +=::op=))"
-    # str/cmd macro name kinds
-    "x\"str\""   => """(macrocall x::StrMacroName (string-r "str"::String))"""
-    "x`str`"     => """(macrocall x::CmdMacroName (cmdstring-r "str"::CmdString))"""
 ]
 
 @testset "parser `Kind` remapping" begin
@@ -1206,7 +1180,7 @@ end
 @testset "Unicode normalization in tree conversion" begin
     # ɛµ normalizes to εμ
     @test parse_to_sexpr_str(JuliaSyntax.parse_eq, "\u025B\u00B5()") == "(call \u03B5\u03BC)"
-    @test parse_to_sexpr_str(JuliaSyntax.parse_eq, "@\u025B\u00B5") == "(macrocall (macro_name \u03B5\u03BC))"
+    @test parse_to_sexpr_str(JuliaSyntax.parse_eq, "@\u025B\u00B5") == "(macrocall @\u03B5\u03BC)"
     @test parse_to_sexpr_str(JuliaSyntax.parse_eq, "\u025B\u00B5\"\"") == "(macrocall @\u03B5\u03BC_str (string-r \"\"))"
     @test parse_to_sexpr_str(JuliaSyntax.parse_eq, "\u025B\u00B5``") == "(macrocall @\u03B5\u03BC_cmd (cmdstring-r \"\"))"
     # · and · normalize to ⋅

@@ -73,36 +73,34 @@ export @K_str, kind
 
 export SyntaxNode
 
-@_public GreenNode, RedTreeCursor, GreenTreeCursor,
+@_public GreenNode,
     span
 
 # Helper utilities
 include("utils.jl")
 
-include("julia/kinds.jl")
+include("kinds.jl")
 
 # Lexing uses a significantly modified version of Tokenize.jl
-include("julia/tokenize.jl")
+include("tokenize.jl")
 
 # Source and diagnostics
-include("core/source_files.jl")
-include("core/diagnostics.jl")
+include("source_files.jl")
+include("diagnostics.jl")
 
 # Parsing
-include("core/parse_stream.jl")
-include("core/tree_cursors.jl")
-include("julia/julia_parse_stream.jl")
-include("julia/parser.jl")
-include("julia/parser_api.jl")
-include("julia/literal_parsing.jl")
+include("parse_stream.jl")
+include("parser.jl")
+include("parser_api.jl")
+include("literal_parsing.jl")
 
 # Tree data structures
-include("porcelain/green_node.jl")
-include("porcelain/syntax_tree.jl")
-include("integration/expr.jl")
+include("green_tree.jl")
+include("syntax_tree.jl")
+include("expr.jl")
 
 # Hooks to integrate the parser with Base
-include("integration/hooks.jl")
+include("hooks.jl")
 include("precompile.jl")
 
 end
