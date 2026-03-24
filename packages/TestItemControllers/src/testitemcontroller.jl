@@ -283,6 +283,13 @@ function handle!(c::TestItemController, msg::GetProcsForTestRunMsg)
             coverage_arg = k.mode == "Coverage" ? "--code-coverage=user" : "--code-coverage=none"
 
             jlEnv = copy(ENV)
+
+            # During precompilation, Julia restricts JULIA_LOAD_PATH to dependency paths only
+            # (no "@" entry), which prevents child processes from using their own active project.
+            if ccall(:jl_generating_output, Cint, ()) == 1
+                delete!(jlEnv, "JULIA_LOAD_PATH")
+            end
+
             for (ek, ev) in pairs(k.env)
                 if ev !== nothing
                     jlEnv[ek] = ev

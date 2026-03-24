@@ -61,6 +61,12 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::TestE
 
     jlEnv = copy(ENV)
 
+    # During precompilation, Julia restricts JULIA_LOAD_PATH to dependency paths only
+    # (no "@" entry), which prevents child processes from using their own active project.
+    if ccall(:jl_generating_output, Cint, ()) == 1
+        delete!(jlEnv, "JULIA_LOAD_PATH")
+    end
+
     for (k,v) in pairs(env.env)
         if v!==nothing
             jlEnv[k] = v
