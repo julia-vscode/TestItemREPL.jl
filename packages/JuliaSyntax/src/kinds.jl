@@ -27,7 +27,7 @@ primitive type Kind 16 end
 const _kind_str_to_int = Dict{String,UInt16}()
 const _kind_int_to_str = Dict{UInt16,String}()
 const _kind_modules = Dict{Int,Union{Symbol,Module}}(
-    0=>nameof(@__MODULE__),
+    0=>:JuliaSyntax,
     1=>:JuliaLowering,
     2=>:JuliaSyntaxFormatter
 )
@@ -49,7 +49,7 @@ function Kind(s::AbstractString)
     Kind(i)
 end
 
-Base.string(x::Kind) = get(_kind_int_to_str, reinterpret(UInt16, x), "<error: unknown kind>")
+Base.string(x::Kind) = _kind_int_to_str[reinterpret(UInt16, x)]
 Base.print(io::IO, x::Kind) = print(io, string(x))
 
 Base.isless(x::Kind, y::Kind) = reinterpret(UInt16, x) < reinterpret(UInt16, y)
@@ -88,7 +88,7 @@ function _register_kinds!(kind_modules, int_to_kindstr, kind_str_to_int, mod, mo
             # Ok: known kind module, but not loaded until now
             kind_modules[module_id] = mod
         elseif m == mod
-            existing_kinds = Union{Nothing, Kind}[(i = get(kind_str_to_int, n, nothing);
+            existing_kinds = [(i = get(kind_str_to_int, n, nothing);
                                isnothing(i) ? nothing : Kind(i)) for n in names]
             if any(isnothing, existing_kinds) ||
                     !issorted(existing_kinds) ||
@@ -102,12 +102,6 @@ function _register_kinds!(kind_modules, int_to_kindstr, kind_str_to_int, mod, mo
             error("Kind module ID $module_id already claimed by module $m")
         end
     end
-    _register_kinds_names!(int_to_kindstr, kind_str_to_int, module_id, names)
-end
-
-# This function is separated from `_register_kinds!` to prevent sharing of the variable `i`
-# here and in the closure in `_register_kinds!`, which causes boxing and bad inference.
-function _register_kinds_names!(int_to_kindstr, kind_str_to_int, module_id, names)
     # Process names to conflate category BEGIN/END markers with the first/last
     # in the category.
     i = 0
@@ -133,7 +127,7 @@ end
 """
     register_kinds!(mod, module_id, names)
 
-Register custom `Kind`s with the given `names`, belonging to a module `mod`.
+Register custom `Kind`s with the given `names`, belonging to a module `mod`. 
 `names` is an array of arbitrary strings.
 
 In order for kinds to be represented by a small number of bits, some nontrivial
@@ -200,10 +194,15 @@ register_kinds!(JuliaSyntax, 0, [
     "BEGIN_IDENTIFIERS"
         "Identifier"
         "Placeholder" # Used for empty catch variables, and all-underscore identifiers in lowering
-        # String and command macro names are modeled as a special kind of
-        # identifier as they need to be mangled before lookup.
-        "StrMacroName"
-        "CmdMacroName"
+        # Macro names are modelled as special kinds of identifiers because the full
+        # macro name may not appear as characters in the source: The `@` may be
+        # detached from the macro name as in `@A.x` (ugh!!), or have a _str or _cmd
+        # suffix appended.
+        "BEGIN_MACRO_NAMES"
+            "MacroName"
+            "StringMacroName"
+            "CmdMacroName"
+        "END_MACRO_NAMES"
     "END_IDENTIFIERS"
 
     "BEGIN_KEYWORDS"
@@ -294,9 +293,7 @@ register_kinds!(JuliaSyntax, 0, [
     "BEGIN_ASSIGNMENTS"
         "BEGIN_SYNTACTIC_ASSIGNMENTS"
         "="
-        ".="
         "op="  # Updating assignment operator ( $= %= &= *= += -= //= /= <<= >>= >>>= \= ^= |= ÷= ⊻= )
-        ".op="
         ":="
         "END_SYNTACTIC_ASSIGNMENTS"
         "~"
@@ -473,13 +470,11 @@ register_kinds!(JuliaSyntax, 0, [
     # Level 4
     "BEGIN_LAZYOR"
         "||"
-        ".||"
     "END_LAZYOR"
 
     # Level 5
     "BEGIN_LAZYAND"
         "&&"
-        ".&&"
     "END_LAZYAND"
 
     # Level 6
@@ -1020,6 +1015,7 @@ register_kinds!(JuliaSyntax, 0, [
         "dotcall"
         "comparison"
         "curly"
+        "inert"          # QuoteNode; not quasiquote
         "juxtapose"      # Numeric juxtaposition like 2x
         "string"         # A string interior node (possibly containing interpolations)
         "cmdstring"      # A cmd string node (containing delimiters plus string)
@@ -1049,7 +1045,6 @@ register_kinds!(JuliaSyntax, 0, [
         "iteration"
         "comprehension"
         "typed_comprehension"
-        "macro_name"
         # Container for a single statement/atom plus any trivia and errors
         "wrapper"
     "END_SYNTAX_KINDS"
@@ -1114,7 +1109,8 @@ const _nonunique_kind_names = Set([
     K"Char"
     K"CmdString"
 
-    K"StrMacroName"
+    K"MacroName"
+    K"StringMacroName"
     K"CmdMacroName"
 ])
 
@@ -1202,6 +1198,7 @@ is_prec_unicode_ops(x) = K"BEGIN_UNICODE_OPS" <= kind(x) <= K"END_UNICODE_OPS"
 is_prec_pipe_lt(x)     = kind(x) == K"<|"
 is_prec_pipe_gt(x)     = kind(x) == K"|>"
 is_syntax_kind(x)      = K"BEGIN_SYNTAX_KINDS"<= kind(x) <= K"END_SYNTAX_KINDS"
+is_macro_name(x)       = K"BEGIN_MACRO_NAMES" <= kind(x) <= K"END_MACRO_NAMES"
 is_syntactic_assignment(x) = K"BEGIN_SYNTACTIC_ASSIGNMENTS" <= kind(x) <= K"END_SYNTACTIC_ASSIGNMENTS"
 
 function is_string_delim(x)

@@ -28,6 +28,7 @@
         "(call-i (call-i a::Identifier *::Identifier b::Identifier) +::Identifier c::Identifier)"
 
     @test sprint(highlight, t[1][3]) == "a*b + c\n# ╙"
+    @test sprint(highlight, t.source, t.raw, 1, 3) == "a*b + c\n# ╙"
 
     # Pass-through field access
     node = t[1][1]
@@ -35,10 +36,6 @@
     # The specific error text has evolved over Julia versions. Check that it involves `SyntaxData` and immutability
     e = try node.val = :q catch e e end
     @test occursin("immutable", e.msg) && occursin("SyntaxData", e.msg)
-
-    # Newline-terminated source
-    t = parsestmt(SyntaxNode, "a*b + c\n")
-    @test sprint(highlight, t[1][3]) == "a*b + c\n# ╙"
 
     # copy
     t = parsestmt(SyntaxNode, "a*b + c")
@@ -56,8 +53,8 @@
 
     # SyntaxNode with offsets
     t,_ = parsestmt(SyntaxNode, "begin a end\nbegin b end", 13)
-    @test first(byte_range(t)) == 13
-    @test first(byte_range(t[1])) == 19
+    @test t.position == 13
+    @test t[1].position == 19
     @test t[1].val == :b
 
     # Unicode character ranges

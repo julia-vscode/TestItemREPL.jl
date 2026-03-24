@@ -14,15 +14,6 @@ if VERSION < v"1.5"
     import Base.peek
 end
 
-@static if VERSION < v"1.8"
-    macro callsite_inline(call)
-        esc(call)
-    end
-else
-    const var"@callsite_inline" = var"@inline"
-end
-
-
 _unsafe_wrap_substring(s) = (s.offset, unsafe_wrap(Vector{UInt8}, s.string))
 
 #--------------------------------------------------

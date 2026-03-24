@@ -41,7 +41,7 @@ Return the first byte of `x` in the source text.
 first_byte(x) = first(byte_range(x))
 
 """
-    last_byte(x)
+    first_byte(x)
 
 Return the last byte of `x` in the source text.
 """
@@ -143,8 +143,7 @@ struct SourceFile
     line_starts::Vector{Int}
 end
 
-Base.hash(s::SourceFile, h::UInt) =
-    hash(s.code, hash(s.byte_offset, hash(s.filename, hash(s.first_line, hash(s.line_starts, h)))))
+Base.hash(s::SourceFile, h::UInt) = hash((s.code, s.byte_offset, s.filename, s.first_line, s.line_starts), h)
 function Base.:(==)(a::SourceFile, b::SourceFile)
     a.code == b.code && a.byte_offset == b.byte_offset && a.filename == b.filename &&
     a.first_line == b.first_line && a.line_starts == b.line_starts
@@ -157,6 +156,9 @@ function SourceFile(code::AbstractString; filename=nothing, first_line=1,
         # The line is considered to start after the `\n`
         code[i] == '\n' && push!(line_starts, i+1)
     end
+    if isempty(code) || last(code) != '\n'
+        push!(line_starts, ncodeunits(code)+1)
+    end
     SourceFile(code, first_index-1, filename, first_line, line_starts)
 end
 
@@ -166,7 +168,8 @@ end
 
 # Get line number of the given byte within the code
 function _source_line_index(source::SourceFile, byte_index)
-    searchsortedlast(source.line_starts, byte_index - source.byte_offset)
+    lineidx = searchsortedlast(source.line_starts, byte_index - source.byte_offset)
+    return (lineidx < lastindex(source.line_starts)) ? lineidx : lineidx-1
 end
 _source_line(source::SourceFile, lineidx) = lineidx + source.first_line - 1
 
@@ -201,10 +204,7 @@ function source_line_range(source::SourceFile, byte_index::Integer;
                            context_lines_before=0, context_lines_after=0)
     lineidx = _source_line_index(source, byte_index)
     fbyte = source.line_starts[max(lineidx-context_lines_before, 1)]
-    lline = lineidx + context_lines_after
-    lbyte = lline >= lastindex(source.line_starts) ?
-        ncodeunits(source.code) : source.line_starts[lline + 1] - 1
-
+    lbyte = source.line_starts[min(lineidx+1+context_lines_after, end)] - 1
     return (fbyte + source.byte_offset,
             lbyte + source.byte_offset)
 end

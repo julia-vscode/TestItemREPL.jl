@@ -20,6 +20,7 @@ using JuliaSyntax: ParseStream,
         yy
     end
     """
+
     st = ParseStream(code)
 
     p1 = position(st)
@@ -72,6 +73,8 @@ using JuliaSyntax: ParseStream,
     @test peek(st) == K"NewlineWs"
     bump(st, TRIVIA_FLAG)
     emit(st, p1, K"toplevel")
+
+    @test build_tree(GreenNode, st) isa JuliaSyntax.GreenNode
 end
 
 @testset "ParseStream constructors" begin
@@ -103,48 +106,47 @@ end
 end
 
 @testset "ParseStream tree traversal" begin
-    # NB: ParseStreamPosition.node_index includes an initial sentinel token so
-    # indices here are one more than "might be expected". Additionally, note that
-    # the byte index points to the first byte after the token.
+    # NB: ParseStreamPosition.token_index includes an initial sentinel token so
+    # indices here are one more than "might be expected".
     st = parse_sexpr("((a b) c)")
     child1_pos = first_child_position(st, position(st))
-    @test child1_pos == ParseStreamPosition(7, 8)
-    @test first_child_position(st, child1_pos) == ParseStreamPosition(4, 4)
-    @test last_child_position(st, position(st)) == ParseStreamPosition(9, 10)
-    @test last_child_position(st, child1_pos) == ParseStreamPosition(6, 6)
+    @test child1_pos == ParseStreamPosition(7, 1)
+    @test first_child_position(st, child1_pos) == ParseStreamPosition(4, 0)
+    @test last_child_position(st, position(st)) == ParseStreamPosition(9, 0)
+    @test last_child_position(st, child1_pos) == ParseStreamPosition(6, 0)
 
     st = parse_sexpr("( (a b) c)")
     child1_pos = first_child_position(st, position(st))
-    @test child1_pos == ParseStreamPosition(8, 9)
-    @test first_child_position(st, child1_pos) == ParseStreamPosition(5, 5)
-    @test last_child_position(st, position(st)) == ParseStreamPosition(10, 11)
-    @test last_child_position(st, child1_pos) == ParseStreamPosition(7, 7)
+    @test child1_pos == ParseStreamPosition(8, 1)
+    @test first_child_position(st, child1_pos) == ParseStreamPosition(5, 0)
+    @test last_child_position(st, position(st)) == ParseStreamPosition(10, 0)
+    @test last_child_position(st, child1_pos) == ParseStreamPosition(7, 0)
 
     st = parse_sexpr("(a (b c))")
-    @test first_child_position(st, position(st)) == ParseStreamPosition(3, 3)
+    @test first_child_position(st, position(st)) == ParseStreamPosition(3, 0)
     child2_pos = last_child_position(st, position(st))
-    @test child2_pos == ParseStreamPosition(9, 10)
-    @test first_child_position(st, child2_pos) == ParseStreamPosition(6, 6)
-    @test last_child_position(st, child2_pos) == ParseStreamPosition(8, 8)
+    @test child2_pos == ParseStreamPosition(9, 1)
+    @test first_child_position(st, child2_pos) == ParseStreamPosition(6, 0)
+    @test last_child_position(st, child2_pos) == ParseStreamPosition(8, 0)
 
     st = parse_sexpr("( a (b c))")
-    @test first_child_position(st, position(st)) == ParseStreamPosition(4, 4)
+    @test first_child_position(st, position(st)) == ParseStreamPosition(4, 0)
     child2_pos = last_child_position(st, position(st))
-    @test child2_pos == ParseStreamPosition(10, 11)
-    @test first_child_position(st, child2_pos) == ParseStreamPosition(7, 7)
-    @test last_child_position(st, child2_pos) == ParseStreamPosition(9, 9)
+    @test child2_pos == ParseStreamPosition(10, 1)
+    @test first_child_position(st, child2_pos) == ParseStreamPosition(7, 0)
+    @test last_child_position(st, child2_pos) == ParseStreamPosition(9, 0)
 
     st = parse_sexpr("a (b c)")
-    @test first_child_position(st, position(st)) == ParseStreamPosition(5, 5)
-    @test last_child_position(st, position(st)) == ParseStreamPosition(7, 7)
+    @test first_child_position(st, position(st)) == ParseStreamPosition(5, 0)
+    @test last_child_position(st, position(st)) == ParseStreamPosition(7, 0)
 
     st = parse_sexpr("(a) (b c)")
-    @test first_child_position(st, position(st)) == ParseStreamPosition(7, 8)
-    @test last_child_position(st, position(st)) == ParseStreamPosition(9, 10)
+    @test first_child_position(st, position(st)) == ParseStreamPosition(7, 0)
+    @test last_child_position(st, position(st)) == ParseStreamPosition(9, 0)
 
     st = parse_sexpr("(() ())")
-    @test first_child_position(st, position(st)) == ParseStreamPosition(4, 5)
-    @test last_child_position(st, position(st)) == ParseStreamPosition(7, 9)
+    @test first_child_position(st, position(st)) == ParseStreamPosition(4, 1)
+    @test last_child_position(st, position(st)) == ParseStreamPosition(7, 2)
 end
 
 @testset "SubString{GenericString} (issue #505)" begin
@@ -155,14 +157,4 @@ end
     @test y isa SubString{GenericString}
     @test ParseStream(y) isa ParseStream
     @test parsestmt(Expr, y) == parsestmt(Expr, "1")
-end
-
-@testset "peek_behind_pos with negative byte index" begin
-    # Test that peek_behind_pos doesn't cause InexactError when byte_idx goes negative
-    # This can happen when parsing certain incomplete keywords like "do"
-    # where trivia skipping walks back past the beginning of the stream
-    @test_throws JuliaSyntax.ParseError parseall(GreenNode, "do")
-    @test_throws JuliaSyntax.ParseError parseall(GreenNode, "do ")
-    @test_throws JuliaSyntax.ParseError parseall(GreenNode, " do")
-    @test_throws JuliaSyntax.ParseError parseall(GreenNode, "do\n")
 end

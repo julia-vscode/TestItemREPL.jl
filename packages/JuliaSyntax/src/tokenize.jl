@@ -2,7 +2,7 @@ module Tokenize
 
 export tokenize, untokenize
 
-using ..JuliaSyntax: JuliaSyntax, Kind, @K_str, @KSet_str, @callsite_inline
+using ..JuliaSyntax: JuliaSyntax, Kind, @K_str, @KSet_str
 
 import ..JuliaSyntax: kind,
     is_literal, is_contextual_keyword, is_word_operator
@@ -197,12 +197,13 @@ struct RawToken
     # Offsets into a string or buffer
     startbyte::Int # The byte where the token start in the buffer
     endbyte::Int # The byte where the token ended in the buffer
+    dotop::Bool
     suffix::Bool
 end
 function RawToken(kind::Kind, startbyte::Int, endbyte::Int)
-    RawToken(kind, startbyte, endbyte, false)
+    RawToken(kind, startbyte, endbyte, false, false)
 end
-RawToken() = RawToken(K"error", 0, 0, false)
+RawToken() = RawToken(K"error", 0, 0, false, false)
 
 const EMPTY_TOKEN = RawToken()
 
@@ -253,6 +254,7 @@ mutable struct Lexer{IO_t <: IO}
     string_states::Vector{StringState}
     chars::Tuple{Char,Char,Char,Char}
     charspos::Tuple{Int,Int,Int,Int}
+    dotop::Bool
 end
 
 function Lexer(io::IO)
@@ -281,7 +283,7 @@ function Lexer(io::IO)
     end
     Lexer(io, position(io),
                   K"error", Vector{StringState}(),
-                  (c1,c2,c3,c4), (p1,p2,p3,p4))
+                  (c1,c2,c3,c4), (p1,p2,p3,p4), false)
 end
 Lexer(str::AbstractString) = Lexer(IOBuffer(str))
 
@@ -436,8 +438,9 @@ function emit(l::Lexer, kind::Kind, maybe_op=true)
         end
     end
 
-    tok = RawToken(kind, startpos(l), position(l) - 1, suffix)
+    tok = RawToken(kind, startpos(l), position(l) - 1, l.dotop, suffix)
 
+    l.dotop = false
     l.last_token = kind
     return tok
 end
@@ -921,7 +924,7 @@ function lex_minus(l::Lexer)
         else
             return emit(l, K"ErrorInvalidOperator") # "--" is an invalid operator
         end
-    elseif l.last_token != K"." && accept(l, '>')
+    elseif !l.dotop && accept(l, '>')
         return emit(l, K"->")
     elseif accept(l, '=')
         return emit(l, K"op=")
@@ -1168,21 +1171,101 @@ end
 function lex_dot(l::Lexer)
     if accept(l, '.')
         if accept(l, '.')
-            l.last_token == K"@" && return emit(l, K"Identifier")
             return emit(l, K"...")
         else
             if is_dottable_operator_start_char(peekchar(l))
                 readchar(l)
                 return emit(l, K"ErrorInvalidOperator")
             else
-                l.last_token == K"@" && return emit(l, K"Identifier")
                 return emit(l, K"..")
             end
         end
     elseif Base.isdigit(peekchar(l))
         return lex_digit(l, K"Float")
     else
-        l.last_token == K"@" && return emit(l, K"Identifier")
+        pc, dpc = dpeekchar(l)
+        if pc == '+'
+            l.dotop = true
+            readchar(l)
+            return lex_plus(l)
+        elseif pc =='-'
+            l.dotop = true
+            readchar(l)
+            return lex_minus(l)
+        elseif pc == '−'
+            l.dotop = true
+            readchar(l)
+            return emit(l, accept(l, '=') ? K"op=" : K"-")
+        elseif pc =='*'
+            l.dotop = true
+            readchar(l)
+            return lex_star(l)
+        elseif pc =='/'
+            l.dotop = true
+            readchar(l)
+            return lex_forwardslash(l)
+        elseif pc =='\\'
+            l.dotop = true
+            readchar(l)
+            return lex_backslash(l)
+        elseif pc =='^'
+            l.dotop = true
+            readchar(l)
+            return lex_circumflex(l)
+        elseif pc =='<'
+            l.dotop = true
+            readchar(l)
+            return lex_less(l)
+        elseif pc =='>'
+            l.dotop = true
+            readchar(l)
+            return lex_greater(l)
+        elseif pc =='&'
+            l.dotop = true
+            readchar(l)
+            if accept(l, '=')
+                return emit(l, K"op=")
+            else
+                if accept(l, '&')
+                    return emit(l, K"&&")
+                end
+                return emit(l, K"&")
+            end
+        elseif pc =='%'
+            l.dotop = true
+            readchar(l)
+            return lex_percent(l)
+        elseif pc == '=' && dpc != '>'
+            l.dotop = true
+            readchar(l)
+            return lex_equal(l)
+        elseif pc == '|'
+            l.dotop = true
+            readchar(l)
+            if accept(l, '|')
+                return emit(l, K"||")
+            end
+            return lex_bar(l)
+        elseif pc == '!' && dpc == '='
+            l.dotop = true
+            readchar(l)
+            return lex_exclaim(l)
+        elseif pc == '⊻'
+            l.dotop = true
+            readchar(l)
+            return lex_xor(l)
+        elseif pc == '÷'
+            l.dotop = true
+            readchar(l)
+            return lex_division(l)
+        elseif pc == '=' && dpc == '>'
+            l.dotop = true
+            readchar(l)
+            return lex_equal(l)
+        elseif is_dottable_operator_start_char(pc)
+            l.dotop = true
+            return _next_token(l, readchar(l))
+        end
         return emit(l, K".")
     end
 end
@@ -1220,14 +1303,14 @@ function lex_identifier(l::Lexer, c)
             @inbounds if (pc_byte == UInt8('!') && ppc == '=') || !ascii_is_identifier_char[pc_byte+1]
                 break
             end
-        elseif @callsite_inline Unicode.isgraphemebreak!(graphemestate, c, pc)
+        elseif Unicode.isgraphemebreak!(graphemestate, c, pc)
             if (pc == '!' && ppc == '=') || !is_identifier_char(pc)
                 break
             end
         elseif pc in ('\u200c','\u200d') # ZWNJ/ZWJ control characters
             # ZWJ/ZWNJ only within grapheme sequences, not at end
             graphemestate_peek[] = graphemestate[]
-            if @callsite_inline Unicode.isgraphemebreak!(graphemestate_peek, pc, ppc)
+            if Unicode.isgraphemebreak!(graphemestate_peek, pc, ppc)
                 break
             end
         end
@@ -1256,8 +1339,7 @@ end
 function simple_hash(str)
     ind = 1
     h = UInt64(0)
-    L = min(lastindex(str), MAX_KW_LENGTH)
-    while ind <= L
+    while ind <= length(str)
         h = simple_hash(str[ind], h)
         ind = nextind(str, ind)
     end

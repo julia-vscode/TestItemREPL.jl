@@ -190,15 +190,13 @@ emitted as `K"Identifier"` (the default) or as `K"+"`.
 function tokenize(text; operators_as_identifiers=true)
     ps = ParseStream(text)
     parse!(ps, rule=:all)
-    ts = ps.output
+    ts = ps.tokens
     output_tokens = Token[]
-    byte_start::UInt32 = ps.output[1].byte_span + 1
     for i = 2:length(ts)
-        if kind(ts[i]) == K"TOMBSTONE" || is_non_terminal(ts[i])
+        if kind(ts[i]) == K"TOMBSTONE"
             continue
         end
-        r = byte_start:(byte_start+ts[i].byte_span - 1)
-        byte_start = last(r) + 1
+        r = ts[i-1].next_byte:ts[i].next_byte-1
         k = kind(ts[i])
         if k == K"Identifier" && !operators_as_identifiers
             orig_k = ts[i].orig_kind
