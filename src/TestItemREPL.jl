@@ -141,7 +141,7 @@ function TestItemRunner(controller::TestItemController; max_history::Int=20)
     )
 end
 
-const _g_runner = Ref{TestItemRunner}()
+const _g_runner = Ref{Union{Nothing,TestItemRunner}}(nothing)
 const _g_runner_lock = ReentrantLock()
 
 function get_run_context(testrun_id::String)
@@ -240,7 +240,7 @@ function _prune_history!(runner::TestItemRunner)
 end
 
 function terminate_process(id::String)
-    if isassigned(_g_runner)
+    if _g_runner[] !== nothing
         TestItemControllers.terminate_test_process(_g_runner[].controller, id)
     end
 end
@@ -248,9 +248,9 @@ end
 # ── Runner initialization ─────────────────────────────────────────────
 
 function get_runner()
-    isassigned(_g_runner) && return _g_runner[]
+    _g_runner[] !== nothing && return _g_runner[]
     lock(_g_runner_lock) do
-        isassigned(_g_runner) && return _g_runner[]
+        _g_runner[] !== nothing && return _g_runner[]
 
         callbacks = TestItemControllers.ControllerCallbacks(
             on_testitem_started = (testrun_id, testitem_id) -> nothing,
@@ -725,7 +725,7 @@ function run_tests(
 end
 
 function kill_test_processes()
-    if isassigned(_g_runner)
+    if _g_runner[] !== nothing
         runner = _g_runner[]
         TestItemControllers.shutdown(runner.controller)
         if runner.reactor_task !== nothing
@@ -736,7 +736,7 @@ function kill_test_processes()
 end
 
 function kill_test_process(id::String)
-    if isassigned(_g_runner)
+    if _g_runner[] !== nothing
         TestItemControllers.terminate_test_process(_g_runner[].controller, id)
     end
 end
@@ -983,10 +983,6 @@ function cmd_run(args; juliaup_channel::Union{Nothing,String}=nothing)
     run_kwargs[:print_summary] = true
 
     printstyled("Starting test run...\n"; color=:cyan)
-
-    # Capture the run ID early (it's been assigned by run_tests at start)
-    # We need to get it after run_tests starts but the ID is generated synchronously
-    # before the async work begins, so we set it after fetch.
 
     # Run tests in a task so we can monitor for ESC key
     test_task = @async try
@@ -1714,6 +1710,9 @@ function _register_repl_mode()
 end
 
 function __init__()
+    # Precompilation leaves a stale runner with dead reactor/shutdown controller; reset it
+    _g_runner[] = nothing
+
     global_logger(ModuleFilterLogger(global_logger()))
 
     if isdefined(Base, :active_repl)
