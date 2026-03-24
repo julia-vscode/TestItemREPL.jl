@@ -716,6 +716,12 @@ function kill_test_processes()
     end
 end
 
+function kill_test_process(id::String)
+    if isassigned(_g_runner)
+        TestItemControllers.terminate_test_process(_g_runner[].controller, id)
+    end
+end
+
 # ── Background run state ──────────────────────────────────────────────
 
 mutable struct BackgroundRun
@@ -768,12 +774,13 @@ function cmd_help()
     println("  status                        Show background run status")
     println("  cancel [id]                   Cancel background run (or run by id)")
     println("  results [id]                  Show results (last run, or run #id)")
-    println("  details <name>                Show detailed results for a test item")
-    println("  output <name>                 Show output log for a test item")
+    println("  results --name=<pattern>      Filter results by test item name")
+    println("  results --verbose             Show full per-profile details")
+    println("  results --output              Show captured output for test items")
     println("  process-log <id>              Show output log for a test process")
     println("  runs [--active]               List all test runs (history)")
     println("  processes                     Show active test processes")
-    println("  kill                          Kill all test processes")
+    println("  kill [process-id]             Kill all or a specific test process")
     nothing
 end
 
@@ -1131,13 +1138,19 @@ end
 function cmd_results(args=String[])
     _check_bg_completion()
 
+    positional, kwargs, flags = parse_args(args)
+
+    name_filter = get(kwargs, :name, nothing)
+    show_verbose = :verbose in flags
+    show_output = :output in flags
+
     result = nothing
     run_id = nothing
     run_record = nothing
 
-    if !isempty(args)
+    if !isempty(positional)
         # results <id> — look up a specific run
-        run_id = args[1]
+        run_id = positional[1]
         history = get_run_history()
         idx = findfirst(r -> r.id == run_id || startswith(r.id, run_id), history)
         if idx === nothing
@@ -1168,9 +1181,38 @@ function cmd_results(args=String[])
         return nothing
     end
 
-    # Count statuses
+    # Apply name filter
+    testitems = if name_filter !== nothing
+        _filter_testitems(result.testitems, name_filter)
+    else
+        result.testitems
+    end
+
+    if name_filter !== nothing && isempty(testitems)
+        println("No test items matching '$(name_filter)'.")
+        return nothing
+    end
+
+    # --verbose: show full per-profile details for each item
+    if show_verbose
+        for ti in testitems
+            _print_testitem_details(ti)
+        end
+        println()
+        return nothing
+    end
+
+    # --output: show only captured output for each item
+    if show_output
+        for ti in testitems
+            _print_testitem_output(ti)
+        end
+        return nothing
+    end
+
+    # Default summary view
     n_passed = 0; n_failed = 0; n_errored = 0; n_skipped = 0
-    for ti in result.testitems
+    for ti in testitems
         for prof in ti.profiles
             if prof.status == :passed;  n_passed += 1
             elseif prof.status == :failed;  n_failed += 1
@@ -1193,8 +1235,9 @@ function cmd_results(args=String[])
         dur = round(time() - run_record.start_time; digits=1)
         duration_str = " ($dur s, in progress)"
     end
+    filter_str = name_filter !== nothing ? " (filtered: '$(name_filter)')" : ""
 
-    printstyled("$(id_str)$(total) test(s)$duration_str"; bold=true)
+    printstyled("$(id_str)$(total) test(s)$duration_str$filter_str"; bold=true)
     print(" — ")
     parts = String[]
     n_passed > 0 && push!(parts, "\e[32m$(n_passed) passed\e[0m")
@@ -1207,7 +1250,7 @@ function cmd_results(args=String[])
         printstyled("  (run still in progress, showing results so far)\n"; color=:yellow)
     end
 
-    if !isempty(result.definition_errors)
+    if name_filter === nothing && !isempty(result.definition_errors)
         printstyled("\nDefinition errors:\n"; color=:red, bold=true)
         for de in result.definition_errors
             println("  $(uri2filepath(de.uri)):$(de.line) — $(de.message)")
@@ -1215,7 +1258,7 @@ function cmd_results(args=String[])
     end
 
     # Show failed/errored details
-    for ti in result.testitems
+    for ti in testitems
         for prof in ti.profiles
             if prof.status in (:failed, :errored)
                 println()
@@ -1237,7 +1280,7 @@ function cmd_results(args=String[])
     # When all pass, show top 5 slowest tests
     if n_failed == 0 && n_errored == 0 && total > 0
         timed = Tuple{String,Float64}[]
-        for ti in result.testitems
+        for ti in testitems
             for prof in ti.profiles
                 if prof.duration !== missing
                     push!(timed, (ti.name, prof.duration))
@@ -1259,9 +1302,22 @@ function cmd_results(args=String[])
     nothing
 end
 
-function cmd_kill()
-    kill_test_processes()
-    printstyled("All test processes terminated.\n"; color=:yellow)
+function cmd_kill(args=String[])
+    if !isempty(args)
+        id = args[1]
+        procs = get_active_processes()
+        idx = findfirst(p -> p.id == id || startswith(p.id, id), procs)
+        if idx === nothing
+            println("No active process found matching '$id'.")
+            return nothing
+        end
+        proc = procs[idx]
+        kill_test_process(proc.id)
+        printstyled("Process $(proc.id) terminated.\n"; color=:yellow)
+    else
+        kill_test_processes()
+        printstyled("All test processes terminated.\n"; color=:yellow)
+    end
     nothing
 end
 
@@ -1292,45 +1348,51 @@ function cmd_processes()
     println("$(length(procs)) process(es) active.")
     nothing
 end
-# ── Detailed inspection commands ─────────────────────────────────────────
+# ── Display helpers ──────────────────────────────────────────────────────
 
-function _find_testitem(result::TestrunResult, name::String)
-    # Exact match first, then case-insensitive contains
-    for ti in result.testitems
-        ti.name == name && return ti
-    end
-    name_lower = lowercase(name)
-    matches = filter(ti -> contains(lowercase(ti.name), name_lower), result.testitems)
-    if length(matches) == 1
-        return matches[1]
-    elseif length(matches) > 1
-        printstyled("Multiple matches for '$name':\n"; color=:yellow)
-        for m in matches
-            println("  $(m.name)")
-        end
-        return nothing
-    end
-    return nothing
+function _filter_testitems(testitems, name_pattern::String)
+    pattern_lower = lowercase(name_pattern)
+    filter(ti -> contains(lowercase(ti.name), pattern_lower), testitems)
 end
 
-function cmd_output(args)
-    result = _last_result[]
-    if result === nothing
-        println("No test results available.")
-        return nothing
-    end
-    if isempty(args)
-        println("Usage: output <test item name>")
-        return nothing
-    end
+function _print_testitem_details(ti)
+    printstyled("\n$(ti.name)"; bold=true)
+    println("  $(uri2filepath(ti.uri))")
 
-    name = join(args, " ")
-    ti = _find_testitem(result, name)
-    if ti === nothing
-        println("No test item found matching '$name'.")
-        return nothing
-    end
+    for prof in ti.profiles
+        println()
+        status_color = if prof.status == :passed
+            :green
+        elseif prof.status in (:failed, :errored)
+            :red
+        elseif prof.status == :skipped
+            :light_black
+        else
+            :default
+        end
+        printstyled("  [$(prof.profile_name)] $(prof.status)"; color=status_color, bold=true)
+        if prof.duration !== missing
+            print(" ($(prof.duration)ms)")
+        end
+        println()
 
+        if prof.messages !== missing
+            for msg in prof.messages
+                println("    $(uri2filepath(msg.uri)):$(msg.line)")
+                println("    ", replace(msg.message, "\n" => "\n    "))
+            end
+        end
+
+        if prof.output !== missing && !isempty(prof.output)
+            printstyled("    Output:\n"; color=:cyan)
+            for line in split(prof.output, '\n')
+                println("      ", line)
+            end
+        end
+    end
+end
+
+function _print_testitem_output(ti)
     printstyled("Output for $(ti.name):\n"; bold=true)
     has_output = false
     for prof in ti.profiles
@@ -1345,7 +1407,6 @@ function cmd_output(args)
     if !has_output
         println("  No output recorded for this test item.")
     end
-    nothing
 end
 
 function cmd_process_log(args)
@@ -1386,60 +1447,7 @@ function cmd_process_log(args)
     nothing
 end
 
-function cmd_details(args)
-    result = _last_result[]
-    if result === nothing
-        println("No test results available.")
-        return nothing
-    end
-    if isempty(args)
-        println("Usage: details <test item name>")
-        return nothing
-    end
 
-    name = join(args, " ")
-    ti = _find_testitem(result, name)
-    if ti === nothing
-        println("No test item found matching '$name'.")
-        return nothing
-    end
-
-    printstyled("\n$(ti.name)"; bold=true)
-    println("  $(uri2filepath(ti.uri))")
-
-    for prof in ti.profiles
-        println()
-        status_color = if prof.status == :passed
-            :green
-        elseif prof.status in (:failed, :errored)
-            :red
-        elseif prof.status == :skipped
-            :light_black
-        else
-            :default
-        end
-        printstyled("  [$(prof.profile_name)] $(prof.status)"; color=status_color, bold=true)
-        if prof.duration !== missing
-            print(" ($(prof.duration)ms)")
-        end
-        println()
-
-        if prof.messages !== missing
-            for msg in prof.messages
-                println("    $(uri2filepath(msg.uri)):$(msg.line)")
-                println("    ", replace(msg.message, "\n" => "\n    "))
-            end
-        end
-
-        if prof.output !== missing && !isempty(prof.output)
-            printstyled("    Output:\n"; color=:cyan)
-            for line in split(prof.output, '\n')
-                println("      ", line)
-            end
-        end
-    end
-    nothing
-end
 
 function cmd_runs(args)
     _, kwargs, flags = parse_args(args)
@@ -1551,10 +1559,6 @@ function repl_parser(input::String)
         return cmd_cancel(args)
     elseif cmd == "results" || cmd == "res"
         return cmd_results(args)
-    elseif cmd == "details" || cmd == "det"
-        return cmd_details(args)
-    elseif cmd == "output" || cmd == "out"
-        return cmd_output(args)
     elseif cmd == "process-log" || cmd == "plog"
         return cmd_process_log(args)
     elseif cmd == "runs"
@@ -1562,7 +1566,7 @@ function repl_parser(input::String)
     elseif cmd == "processes" || cmd == "procs" || cmd == "ps"
         return cmd_processes()
     elseif cmd == "kill"
-        return cmd_kill()
+        return cmd_kill(args)
     else
         printstyled("Unknown command: $cmd\n"; color=:red)
         println("Type 'help' for available commands.")
