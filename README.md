@@ -6,7 +6,7 @@ TestItemREPL.jl provides an interactive REPL mode for running [test items](https
 
 ## Documentation
 
-Full documentation is available at **https://julia-testitems/guide/repl**.
+Full documentation is available at **https://julia-testitems.org/guide/repl**.
 
 ## Quick Start
 
