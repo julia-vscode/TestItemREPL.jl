@@ -5,10 +5,10 @@ import Tachikoma: Frame, Buffer, Rect, KeyEvent, pre_render!
 # Bring in TestItemREPL dashboard types
 push!(LOAD_PATH, joinpath(@__DIR__, ".."))
 using TestItemREPL: DashboardState, DashboardTestItem, DashboardProcess,
-    TestRunDashboard, DashboardSnapshot,
+    DashboardLogEntry, TestRunDashboard, DashboardSnapshot,
     dashboard_push_testitem!, dashboard_update_process!,
-    dashboard_remove_process!, dashboard_push_process_output!,
-    dashboard_set_completed!, snapshot
+    dashboard_remove_process!, dashboard_push_log_entry!,
+    dashboard_push_process_line!, dashboard_set_completed!, snapshot
 
 # CancellationTokens is re-exported through TestItemControllers
 using TestItemREPL: CancellationTokenSource, cancel, get_token, is_cancellation_requested
@@ -45,6 +45,7 @@ end
     @test ds.count_skipped == 0
     @test isempty(ds.testitems)
     @test isempty(ds.processes)
+    @test isempty(ds.log_entries)
 end
 
 @testset "DashboardState no-arg constructor" begin
@@ -89,22 +90,42 @@ end
     @test ds.processes[1].id == "proc-2"
 end
 
-@testset "dashboard_push_process_output!" begin
+@testset "dashboard_push_log_entry!" begin
     ds = make_state()
-    dashboard_push_process_output!(ds, "Line 1")
-    dashboard_push_process_output!(ds, "Line 2")
-    @test length(ds.process_output_lines) == 2
-    @test ds.process_output_lines[1] == "Line 1"
+    entry1 = DashboardLogEntry("test_a", "Default", :passed, 100.0, "")
+    entry2 = DashboardLogEntry("test_b", "Default", :failed, 200.0, "assertion failed")
+    dashboard_push_log_entry!(ds, entry1)
+    dashboard_push_log_entry!(ds, entry2)
+    @test length(ds.log_entries) == 2
+    @test ds.log_entries[1].name == "test_a"
+    @test ds.log_entries[2].status == :failed
 end
 
-@testset "dashboard_push_process_output! cap" begin
+@testset "dashboard_push_log_entry! cap" begin
     ds = make_state()
     for i in 1:2100
-        dashboard_push_process_output!(ds, "Line $i")
+        dashboard_push_log_entry!(ds, DashboardLogEntry("test_$i", "D", :passed, 10.0, ""))
     end
-    # Cap triggers at >2000, trims to 1500, then remaining pushes add back
-    @test length(ds.process_output_lines) <= 2000
-    @test length(ds.process_output_lines) < 2100  # definitely trimmed
+    @test length(ds.log_entries) <= 2000
+    @test length(ds.log_entries) < 2100  # definitely trimmed
+end
+
+@testset "dashboard_push_process_line!" begin
+    ds = make_state()
+    dashboard_update_process!(ds, "proc-1", "MyPkg", "Running")
+    dashboard_push_process_line!(ds, "proc-1", "Line 1")
+    dashboard_push_process_line!(ds, "proc-1", "Line 2")
+    @test length(ds.processes[1].output_lines) == 2
+    @test ds.processes[1].output_lines[1] == "Line 1"
+end
+
+@testset "dashboard_push_process_line! cap" begin
+    ds = make_state()
+    dashboard_update_process!(ds, "proc-1", "MyPkg", "Running")
+    for i in 1:2100
+        dashboard_push_process_line!(ds, "proc-1", "Line $i")
+    end
+    @test length(ds.processes[1].output_lines) <= 2000
 end
 
 @testset "dashboard_set_completed!" begin
@@ -137,8 +158,9 @@ end
     ds = make_state()
     m = make_model(ds)
     @test m.quit == false
-    @test m.focus == 1
-    @test m.selected == 1
+    @test m.focus == 2
+    @test m.active_tab == 1
+    @test m.tree_cursor == 1
     @test Tachikoma.should_quit(m) == false
 end
 
@@ -154,45 +176,49 @@ end
     ds = make_state()
     m = make_model(ds)
     pre_render!(m)  # need snap for update
-    @test m.focus == 1
-    Tachikoma.update!(m, KeyEvent(:tab))
-    @test m.focus == 2
+    @test m.focus == 2  # starts on left pane
     Tachikoma.update!(m, KeyEvent(:tab))
     @test m.focus == 3
     Tachikoma.update!(m, KeyEvent(:tab))
     @test m.focus == 1
+    Tachikoma.update!(m, KeyEvent(:tab))
+    @test m.focus == 2
 end
 
-@testset "update! number keys set focus" begin
+@testset "update! number keys switch tabs" begin
     ds = make_state()
     m = make_model(ds)
     pre_render!(m)
+    @test m.active_tab == 1
     Tachikoma.update!(m, KeyEvent('2'))
-    @test m.focus == 2
-    Tachikoma.update!(m, KeyEvent('3'))
-    @test m.focus == 3
+    @test m.active_tab == 2
     Tachikoma.update!(m, KeyEvent('1'))
-    @test m.focus == 1
+    @test m.active_tab == 1
 end
 
-@testset "update! arrow keys navigate list" begin
+@testset "update! arrow keys navigate tree" begin
     ds = make_state(; n_total=3)
     for name in ["test_a", "test_b", "test_c"]
-        dashboard_push_testitem!(ds, DashboardTestItem(name, "", "Default", :passed, 50.0, String[], ""))
+        dashboard_push_testitem!(ds, DashboardTestItem(name, "file:///src/test.jl", "Default", :passed, 50.0, String[], ""))
     end
     m = make_model(ds)
-    m.focus = 1
-    pre_render!(m)
+    m.focus = 2  # left pane (tree)
+    m.active_tab = 1  # Tests tab
+    pre_render!(m)  # builds tree_rows
 
-    @test m.selected == 1
+    # tree_rows: dir row + 3 item rows = 4
+    @test length(m.tree_rows) == 4
+    @test m.tree_cursor == 1
     Tachikoma.update!(m, KeyEvent(:down))
-    @test m.selected == 2
+    @test m.tree_cursor == 2
     Tachikoma.update!(m, KeyEvent(:down))
-    @test m.selected == 3
+    @test m.tree_cursor == 3
     Tachikoma.update!(m, KeyEvent(:down))
-    @test m.selected == 3  # clamped
+    @test m.tree_cursor == 4
+    Tachikoma.update!(m, KeyEvent(:down))
+    @test m.tree_cursor == 4  # clamped
     Tachikoma.update!(m, KeyEvent(:up))
-    @test m.selected == 2
+    @test m.tree_cursor == 3
 end
 
 @testset "update! q quits only when done" begin
@@ -250,8 +276,8 @@ end
 
 @testset "view renders test items" begin
     ds = make_state(; n_total=2)
-    dashboard_push_testitem!(ds, DashboardTestItem("my_test_alpha", "", "Default", :passed, 100.0, String[], ""))
-    dashboard_push_testitem!(ds, DashboardTestItem("my_test_beta", "", "Default", :failed, 200.0, ["assertion failed"], ""))
+    dashboard_push_testitem!(ds, DashboardTestItem("my_test_alpha", "file:///src/test.jl", "Default", :passed, 100.0, String[], ""))
+    dashboard_push_testitem!(ds, DashboardTestItem("my_test_beta", "file:///src/test.jl", "Default", :failed, 200.0, ["assertion failed"], ""))
     ds.count_success = 1
     ds.count_fail = 1
 
@@ -283,32 +309,33 @@ end
     @test find_text(tb, "ESC") !== nothing || find_text(tb, "Esc") !== nothing
 end
 
-@testset "view with process output" begin
+@testset "view with log entries" begin
     ds = make_state()
-    dashboard_push_process_output!(ds, "Process started on port 1234")
+    dashboard_push_log_entry!(ds, DashboardLogEntry("test_foo", "Default", :passed, 100.0, ""))
 
     m = make_model(ds)
     tb = render_model(m)
 
-    # The output line should appear somewhere
-    @test find_text(tb, "port 1234") !== nothing || find_text(tb, "Process") !== nothing
+    # The log entry should appear somewhere
+    @test find_text(tb, "test_foo") !== nothing
 end
 
 @testset "navigation changes detail view" begin
     ds = make_state(; n_total=2)
-    dashboard_push_testitem!(ds, DashboardTestItem("first_test", "", "Default", :passed, 100.0, String[], "some output text"))
-    dashboard_push_testitem!(ds, DashboardTestItem("second_test", "", "Default", :failed, 200.0, ["error msg"], ""))
+    dashboard_push_testitem!(ds, DashboardTestItem("first_test", "file:///src/test.jl", "Default", :passed, 100.0, String[], "some output text"))
+    dashboard_push_testitem!(ds, DashboardTestItem("second_test", "file:///src/test.jl", "Default", :failed, 200.0, ["error msg"], ""))
     ds.count_success = 1
     ds.count_fail = 1
 
     m = make_model(ds)
-    m.focus = 1
+    m.focus = 2  # left pane (tree)
     tb1 = render_model(m)
 
-    # Select second item
+    # Navigate tree to second item (first row is dir, items start at row 2)
+    Tachikoma.update!(m, KeyEvent(:down))
     Tachikoma.update!(m, KeyEvent(:down))
     tb2 = render_model(m)
 
-    # The second test should appear differently (detail pane shows selected item)
-    @test m.selected == 2
+    # The cursor should have moved
+    @test m.tree_cursor >= 2
 end

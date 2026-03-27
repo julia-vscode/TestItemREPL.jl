@@ -290,6 +290,9 @@ function get_runner()
                             ds.testitems[idx].duration = duration !== missing ? Float64(duration) : nothing
                         end
                     end
+                    dashboard_push_log_entry!(ds, DashboardLogEntry(
+                        testitem.label, ctx.environment_name, :passed,
+                        duration !== missing ? Float64(duration) : nothing, ""))
                 end
             end,
             on_testitem_failed = (testrun_id, testitem_id, messages, duration) -> begin
@@ -317,6 +320,10 @@ function get_runner()
                             ds.testitems[idx].messages = msg_strs
                         end
                     end
+                    summary_msg = isempty(msg_strs) ? "" : first(split(msg_strs[1], '\n'))
+                    dashboard_push_log_entry!(ds, DashboardLogEntry(
+                        testitem.label, ctx.environment_name, :failed,
+                        duration !== missing ? Float64(duration) : nothing, summary_msg))
                 end
             end,
             on_testitem_errored = (testrun_id, testitem_id, messages, duration) -> begin
@@ -344,6 +351,10 @@ function get_runner()
                             ds.testitems[idx].messages = msg_strs
                         end
                     end
+                    summary_msg = isempty(msg_strs) ? "" : first(split(msg_strs[1], '\n'))
+                    dashboard_push_log_entry!(ds, DashboardLogEntry(
+                        testitem.label, ctx.environment_name, :errored,
+                        duration !== missing ? Float64(duration) : nothing, summary_msg))
                 end
             end,
             on_testitem_skipped = (testrun_id, testitem_id) -> begin
@@ -367,6 +378,8 @@ function get_runner()
                             ds.testitems[idx].status = :skipped
                         end
                     end
+                    dashboard_push_log_entry!(ds, DashboardLogEntry(
+                        testitem.label, ctx.environment_name, :skipped, nothing, ""))
                 end
             end,
             on_append_output = (testrun_id, testitem_id, output) -> begin
@@ -455,11 +468,11 @@ function get_runner()
                     end
                     push!(runner.process_outputs[id], output)
                 end
-                # Push to dashboard states
+                # Push to dashboard states (per-process output)
                 lock(runner.lock) do
                     for ctx in values(runner.run_contexts)
                         ds = ctx.dashboard_state
-                        ds !== nothing && dashboard_push_process_output!(ds, output)
+                        ds !== nothing && dashboard_push_process_line!(ds, id, output)
                     end
                 end
             end,
